@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rhythm Sightreader</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Space+Grotesk:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.3/build/cjs/vexflow.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/tone@15.0.4/build/Tone.js"></script>
+  </head>
+  <body>
+    <div class="background-glow" aria-hidden="true"></div>
+    <main class="app-shell">
+      <header class="hero">
+        <p class="eyebrow">Percussion Studio</p>
+        <h1>Rhythm Sightreader Challenge</h1>
+        <p class="subtitle">
+          Generate a rhythm, perform it on the spacebar, and get millisecond-precise timing feedback.
+        </p>
+      </header>
+
+      <section class="control-panel">
+        <label for="levelSelect">Level</label>
+        <select id="levelSelect" aria-label="Rhythm level"></select>
+
+        <button id="generateBtn" type="button">Generate</button>
+        <button id="startBtn" type="button">Start</button>
+        <button id="loopBtn" type="button">Loop x4</button>
+
+        <div class="tempo-controls">
+          <label for="tempoSlider">Tempo</label>
+          <input id="tempoSlider" type="range" min="40" max="220" step="1" value="90" />
+          <input id="tempoInput" type="number" min="40" max="220" step="1" value="90" aria-label="Tempo BPM" />
+          <span>BPM</span>
+        </div>
+
+        <div class="sound-controls">
+          <label for="clickSoundSelect">Click Sound</label>
+          <select id="clickSoundSelect" aria-label="Metronome sound">
+            <option value="click">Short Click</option>
+            <option value="tick">Short Tick</option>
+          </select>
+        </div>
+
+        <div class="readout-grid">
+          <div class="readout-box">
+            <span>Time Signature</span>
+            <strong id="timeSignatureValue">-</strong>
+          </div>
+          <div class="readout-box">
+            <span>BPM</span>
+            <strong id="tempoValue">-</strong>
+          </div>
+          <div class="readout-box">
+            <span>Status</span>
+            <strong id="statusValue">Idle</strong>
+          </div>
+        </div>
+
+        <div class="beat-indicator" id="beatIndicator" aria-live="polite">
+          <span class="dot"></span>
+          <span id="beatText">Ready</span>
+        </div>
+      </section>
+
+      <section class="notation-panel">
+        <div class="panel-heading">
+          <h2>Notation</h2>
+          <p>Press <kbd>Space</kbd> to perform once playback starts.</p>
+        </div>
+        <div id="notationContainer" class="notation-container" role="img" aria-label="Generated rhythm notation"></div>
+      </section>
+
+      <section class="results-panel">
+        <div class="panel-heading">
+          <h2>Performance Feedback</h2>
+          <p id="tapStatus">No taps recorded.</p>
+        </div>
+
+        <div id="summaryCards" class="summary-cards"></div>
+        <div id="loopBreakdown" class="loop-breakdown"></div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Note #</th>
+                <th>Expected (ms)</th>
+                <th>Actual (ms)</th>
+                <th>Offset (ms)</th>
+                <th>Result</th>
+              </tr>
+            </thead>
+            <tbody id="feedbackTableBody"></tbody>
+          </table>
+        </div>
+
+        <div class="timeline-area">
+          <h3>Timing Timeline</h3>
+          <div id="timelineStrip"></div>
+        </div>
+      </section>
+    </main>
+
+    <script src="./src/app.global.js"></script>
+  </body>
+</html>
