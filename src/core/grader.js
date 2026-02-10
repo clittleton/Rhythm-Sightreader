@@ -1,5 +1,7 @@
 const MISS_COST = 160;
 const EXTRA_COST = 120;
+const MISSED_NOTE_PENALTY = 8;
+const EXTRA_TAP_PENALTY = 5;
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -115,7 +117,11 @@ export function gradeAttempt(expectedOnsetsMs, tapOnsetsMs) {
   const missedCount = matchedTapIndices.filter((idx) => idx === -1).length;
   const extraTapCount = extraTapIndices.length;
   const rawAverage = perNoteScore.reduce((sum, score) => sum + score, 0) / Math.max(perNoteScore.length, 1);
-  const overallAccuracy = clamp(Math.round(rawAverage - extraTapCount * 3), 0, 100);
+  const overallAccuracy = clamp(
+    Math.round(rawAverage - missedCount * MISSED_NOTE_PENALTY - extraTapCount * EXTRA_TAP_PENALTY),
+    0,
+    100,
+  );
 
   const matchedOffsets = tapOffsetsMs.filter((offset) => offset !== null);
   const meanOffset =

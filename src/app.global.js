@@ -425,11 +425,17 @@
       return idx === -1;
     }).length;
     const extraTapCount = aligned.extraTapIndices.length;
+    const missedNotePenalty = 8;
+    const extraTapPenalty = 5;
     const rawAverage =
       perNoteScore.reduce(function (sum, score) {
         return sum + score;
       }, 0) / Math.max(perNoteScore.length, 1);
-    const overallAccuracy = clamp(Math.round(rawAverage - extraTapCount * 3), 0, 100);
+    const overallAccuracy = clamp(
+      Math.round(rawAverage - missedCount * missedNotePenalty - extraTapCount * extraTapPenalty),
+      0,
+      100,
+    );
 
     const matchedOffsets = tapOffsetsMs.filter(function (offset) {
       return offset !== null;
