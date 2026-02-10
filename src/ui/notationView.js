@@ -225,7 +225,90 @@ function applyDotsToNote(VF, staveNote, dotCount) {
   }
 }
 
-export function renderNotation(container, exercise) {
+function getAnalysisDotColor(offsetMs) {
+  if (offsetMs === null) {
+    return "#aa2e2e";
+  }
+
+  const abs = Math.abs(offsetMs);
+  if (abs <= 50) {
+    return "#177245";
+  }
+  if (abs <= 100) {
+    return "#ab6f00";
+  }
+  return "#aa2e2e";
+}
+
+function getAnalysisDotShiftPx(offsetMs) {
+  const clamped = Math.max(-220, Math.min(220, offsetMs));
+  return (clamped / 220) * 26;
+}
+
+function drawNotationAnalysisRows(container, onsetAnchors, analysisRows) {
+  if (!Array.isArray(analysisRows) || analysisRows.length === 0 || onsetAnchors.length === 0) {
+    return;
+  }
+
+  const svg = container.querySelector("svg");
+  if (!svg) {
+    return;
+  }
+
+  const svgNs = "http://www.w3.org/2000/svg";
+  const layer = document.createElementNS(svgNs, "g");
+  layer.setAttribute("class", "analysis-dots-layer");
+
+  const baseY = Math.max(...onsetAnchors.map((anchor) => anchor.y)) + 24;
+  const rowSpacing = 22;
+
+  analysisRows.forEach((row, rowIndex) => {
+    const rowY = baseY + rowIndex * rowSpacing;
+
+    if (row.label) {
+      const label = document.createElementNS(svgNs, "text");
+      label.setAttribute("x", "10");
+      label.setAttribute("y", String(rowY + 3));
+      label.setAttribute("font-size", "11");
+      label.setAttribute("font-family", "Space Grotesk, sans-serif");
+      label.setAttribute("fill", "#345654");
+      label.textContent = row.label;
+      layer.append(label);
+    }
+
+    onsetAnchors.forEach((anchor, noteIndex) => {
+      const offsetMs = row.offsetsMs[noteIndex] ?? null;
+
+      if (offsetMs === null) {
+        const miss = document.createElementNS(svgNs, "text");
+        miss.setAttribute("x", String(anchor.x));
+        miss.setAttribute("y", String(rowY + 3));
+        miss.setAttribute("text-anchor", "middle");
+        miss.setAttribute("font-size", "11");
+        miss.setAttribute("font-family", "Space Grotesk, sans-serif");
+        miss.setAttribute("fill", "#aa2e2e");
+        miss.textContent = "X";
+        layer.append(miss);
+        return;
+      }
+
+      const dot = document.createElementNS(svgNs, "circle");
+      dot.setAttribute("cx", String(anchor.x + getAnalysisDotShiftPx(offsetMs)));
+      dot.setAttribute("cy", String(rowY));
+      dot.setAttribute("r", "4.8");
+      dot.setAttribute("fill", getAnalysisDotColor(offsetMs));
+      dot.setAttribute("stroke", "#ffffff");
+      dot.setAttribute("stroke-width", "0.8");
+      dot.setAttribute("opacity", "0.94");
+      dot.setAttribute("data-offset-ms", String(offsetMs));
+      layer.append(dot);
+    });
+  });
+
+  svg.append(layer);
+}
+
+export function renderNotation(container, exercise, analysisRows = []) {
   if (!exercise) {
     container.innerHTML = "";
     return;
@@ -242,7 +325,7 @@ export function renderNotation(container, exercise) {
   container.innerHTML = "";
 
   const width = Math.max(760, container.clientWidth || 760);
-  const height = 210;
+  const height = 210 + (Array.isArray(analysisRows) ? analysisRows.length : 0) * 24;
   const renderer = new VF.Renderer(container, VF.Renderer.Backends.SVG);
   renderer.resize(width, height);
   const context = renderer.getContext();
@@ -260,6 +343,7 @@ export function renderNotation(container, exercise) {
     (innerWidth - measureGap * (exercise.measuresPerExercise - 1)) / exercise.measuresPerExercise;
 
   const tiesToDraw = [];
+  const onsetAnchors = [];
 
   groupedMeasures.forEach((measureTokens, measureIndex) => {
     const measureStartTick = measureIndex * exercise.measureTicks;
@@ -319,6 +403,18 @@ export function renderNotation(container, exercise) {
     beams.forEach((beam) => beam.setContext(context).draw());
 
     displayTokens.forEach((token, localIndex) => {
+      const previousToken = displayTokens[localIndex - 1];
+      if (!token.isRest && !previousToken?.tieToNext) {
+        const note = noteMap.get(localIndex);
+        if (note) {
+          const y = Array.isArray(note.getYs?.()) ? note.getYs()[0] : 90;
+          onsetAnchors.push({
+            x: note.getAbsoluteX(),
+            y,
+          });
+        }
+      }
+
       if (!token.tieToNext) {
         return;
       }
@@ -346,4 +442,5 @@ export function renderNotation(container, exercise) {
   });
 
   tiesToDraw.forEach((tie) => tie.setContext(context).draw());
+  drawNotationAnalysisRows(container, onsetAnchors, analysisRows);
 }

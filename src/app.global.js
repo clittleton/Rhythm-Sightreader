@@ -846,7 +846,89 @@
     }
   }
 
-  function renderNotation(container, exercise) {
+  function getAnalysisDotColor(offsetMs) {
+    if (offsetMs === null) {
+      return "#aa2e2e";
+    }
+    const abs = Math.abs(offsetMs);
+    if (abs <= 50) {
+      return "#177245";
+    }
+    if (abs <= 100) {
+      return "#ab6f00";
+    }
+    return "#aa2e2e";
+  }
+
+  function getAnalysisDotShiftPx(offsetMs) {
+    const clamped = Math.max(-220, Math.min(220, offsetMs));
+    return (clamped / 220) * 26;
+  }
+
+  function drawNotationAnalysisRows(container, onsetAnchors, analysisRows) {
+    if (!Array.isArray(analysisRows) || !analysisRows.length || !onsetAnchors.length) {
+      return;
+    }
+
+    const svg = container.querySelector("svg");
+    if (!svg) {
+      return;
+    }
+
+    const svgNs = "http://www.w3.org/2000/svg";
+    const layer = document.createElementNS(svgNs, "g");
+    layer.setAttribute("class", "analysis-dots-layer");
+
+    const baseY = Math.max(...onsetAnchors.map((anchor) => anchor.y)) + 24;
+    const rowSpacing = 22;
+
+    analysisRows.forEach(function (row, rowIndex) {
+      const rowY = baseY + rowIndex * rowSpacing;
+
+      if (row.label) {
+        const label = document.createElementNS(svgNs, "text");
+        label.setAttribute("x", "10");
+        label.setAttribute("y", String(rowY + 3));
+        label.setAttribute("font-size", "11");
+        label.setAttribute("font-family", "Space Grotesk, sans-serif");
+        label.setAttribute("fill", "#345654");
+        label.textContent = row.label;
+        layer.append(label);
+      }
+
+      onsetAnchors.forEach(function (anchor, noteIndex) {
+        const offsetMs = row.offsetsMs[noteIndex] ?? null;
+
+        if (offsetMs === null) {
+          const miss = document.createElementNS(svgNs, "text");
+          miss.setAttribute("x", String(anchor.x));
+          miss.setAttribute("y", String(rowY + 3));
+          miss.setAttribute("text-anchor", "middle");
+          miss.setAttribute("font-size", "11");
+          miss.setAttribute("font-family", "Space Grotesk, sans-serif");
+          miss.setAttribute("fill", "#aa2e2e");
+          miss.textContent = "X";
+          layer.append(miss);
+          return;
+        }
+
+        const dot = document.createElementNS(svgNs, "circle");
+        dot.setAttribute("cx", String(anchor.x + getAnalysisDotShiftPx(offsetMs)));
+        dot.setAttribute("cy", String(rowY));
+        dot.setAttribute("r", "4.8");
+        dot.setAttribute("fill", getAnalysisDotColor(offsetMs));
+        dot.setAttribute("stroke", "#ffffff");
+        dot.setAttribute("stroke-width", "0.8");
+        dot.setAttribute("opacity", "0.94");
+        dot.setAttribute("data-offset-ms", String(offsetMs));
+        layer.append(dot);
+      });
+    });
+
+    svg.append(layer);
+  }
+
+  function renderNotation(container, exercise, analysisRows) {
     if (!exercise) {
       container.innerHTML = "";
       return;
@@ -863,7 +945,8 @@
     container.innerHTML = "";
 
     const width = Math.max(760, container.clientWidth || 760);
-    const height = 210;
+    const rowCount = Array.isArray(analysisRows) ? analysisRows.length : 0;
+    const height = 210 + rowCount * 24;
     const renderer = new VF.Renderer(container, VF.Renderer.Backends.SVG);
     renderer.resize(width, height);
     const context = renderer.getContext();
@@ -880,6 +963,7 @@
     const measureWidth =
       (innerWidth - measureGap * (exercise.measuresPerExercise - 1)) / exercise.measuresPerExercise;
     const tiesToDraw = [];
+    const onsetAnchors = [];
 
     groupedMeasures.forEach(function (measureTokens, measureIndex) {
       const measureStartTick = measureIndex * exercise.measureTicks;
@@ -939,6 +1023,19 @@
       });
 
       displayTokens.forEach(function (token, localIndex) {
+        const previousToken = displayTokens[localIndex - 1];
+        if (!token.isRest && !(previousToken && previousToken.tieToNext)) {
+          const note = noteMap.get(localIndex);
+          if (note) {
+            const ys = typeof note.getYs === "function" ? note.getYs() : null;
+            const y = Array.isArray(ys) ? ys[0] : 90;
+            onsetAnchors.push({
+              x: note.getAbsoluteX(),
+              y: y,
+            });
+          }
+        }
+
         if (!token.tieToNext) {
           return;
         }
@@ -967,6 +1064,7 @@
     tiesToDraw.forEach(function (tie) {
       tie.setContext(context).draw();
     });
+    drawNotationAnalysisRows(container, onsetAnchors, analysisRows || []);
   }
 
   function Metronome() {
@@ -1313,7 +1411,7 @@
 
     ui.timeSignatureValue.textContent = exercise.timeSignature.num + "/" + exercise.timeSignature.den;
     syncTempoControls(exercise.tempoBpm);
-    renderNotation(ui.notationContainer, exercise);
+    renderNotation(ui.notationContainer, exercise, []);
   }
 
   function applyTempoToExercise(tempoBpm, source) {
@@ -1360,7 +1458,7 @@
     const tapsMs = appState.loopTapSets[safeIndex];
 
     renderAttemptTable(ui.feedbackTableBody, appState.exercise.expectedOnsetsMs, tapsMs, result);
-    renderTimeline(ui.timelineStrip, result);
+    ui.timelineStrip.innerHTML = "";
     setTapStatus("Showing loop " + (safeIndex + 1) + " detail. Taps: " + tapsMs.length);
   }
 
@@ -1390,6 +1488,7 @@
     };
 
     resetResults();
+    renderNotation(ui.notationContainer, sessionExercise, []);
     setButtonsDisabled(true);
     setStatus("Starting");
     setTapStatus("Preparing audio and count-in...");
@@ -1445,13 +1544,16 @@
             const result = gradeAttempt(sessionExercise.expectedOnsetsMs, payload.loopTapsMs[0]);
             appState.loopResults = [result];
             renderSummaryCards(ui.summaryCards, result, "Attempt");
+            renderNotation(ui.notationContainer, sessionExercise, [
+              { label: "Attempt", offsetsMs: result.tapOffsetsMs },
+            ]);
             renderAttemptTable(
               ui.feedbackTableBody,
               sessionExercise.expectedOnsetsMs,
               payload.loopTapsMs[0],
               result,
             );
-            renderTimeline(ui.timelineStrip, result);
+            ui.timelineStrip.innerHTML = "";
             setTapStatus("Completed. Recorded " + payload.loopTapsMs[0].length + " taps.");
             setStatus("Ready");
             return;
@@ -1459,6 +1561,16 @@
 
           const challenge = gradeChallenge(sessionExercise.expectedOnsetsMs, payload.loopTapsMs);
           appState.loopResults = challenge.loopResults;
+          renderNotation(
+            ui.notationContainer,
+            sessionExercise,
+            challenge.loopResults.map(function (loopResult, loopIndex) {
+              return {
+                label: "Loop " + (loopIndex + 1),
+                offsetsMs: loopResult.tapOffsetsMs,
+              };
+            }),
+          );
 
           renderSummaryCards(
             ui.summaryCards,

@@ -3,7 +3,7 @@ import { getLevelConfig, listLevelIds } from "./config/levels.js";
 import { gradeAttempt, gradeChallenge } from "./core/grader.js";
 import { buildExpectedOnsetsMs, generateExercise, getExerciseDurationMs } from "./core/rhythmGenerator.js";
 import { TimingEngine } from "./core/timingEngine.js";
-import { clearFeedback, renderAttemptTable, renderLoopBreakdown, renderSummaryCards, renderTimeline } from "./ui/feedbackView.js";
+import { clearFeedback, renderAttemptTable, renderLoopBreakdown, renderSummaryCards } from "./ui/feedbackView.js";
 import { renderNotation } from "./ui/notationView.js";
 
 const ui = {
@@ -102,7 +102,7 @@ function renderCurrentExercise() {
 
   ui.timeSignatureValue.textContent = `${exercise.timeSignature.num}/${exercise.timeSignature.den}`;
   syncTempoControls(exercise.tempoBpm);
-  renderNotation(ui.notationContainer, exercise);
+  renderNotation(ui.notationContainer, exercise, []);
 }
 
 function applyTempoToExercise(tempoBpm, source) {
@@ -150,7 +150,7 @@ function showLoopDetail(loopIndex) {
   const tapsMs = appState.loopTapSets[safeIndex];
 
   renderAttemptTable(ui.feedbackTableBody, appState.exercise.expectedOnsetsMs, tapsMs, result);
-  renderTimeline(ui.timelineStrip, result);
+  ui.timelineStrip.innerHTML = "";
   setTapStatus(`Showing loop ${safeIndex + 1} detail. Taps: ${tapsMs.length}`);
 }
 
@@ -178,6 +178,7 @@ async function runSession(loops) {
   };
 
   resetResults();
+  renderNotation(ui.notationContainer, sessionExercise, []);
   setButtonsDisabled(true);
   setStatus("Starting");
   setTapStatus("Preparing audio and count-in...");
@@ -231,8 +232,11 @@ async function runSession(loops) {
           const result = gradeAttempt(sessionExercise.expectedOnsetsMs, loopTapsMs[0]);
           appState.loopResults = [result];
           renderSummaryCards(ui.summaryCards, result, "Attempt");
+          renderNotation(ui.notationContainer, sessionExercise, [
+            { label: "Attempt", offsetsMs: result.tapOffsetsMs },
+          ]);
           renderAttemptTable(ui.feedbackTableBody, sessionExercise.expectedOnsetsMs, loopTapsMs[0], result);
-          renderTimeline(ui.timelineStrip, result);
+          ui.timelineStrip.innerHTML = "";
           setTapStatus(`Completed. Recorded ${loopTapsMs[0].length} taps.`);
           setStatus("Ready");
           return;
@@ -240,6 +244,14 @@ async function runSession(loops) {
 
         const challenge = gradeChallenge(sessionExercise.expectedOnsetsMs, loopTapsMs);
         appState.loopResults = challenge.loopResults;
+        renderNotation(
+          ui.notationContainer,
+          sessionExercise,
+          challenge.loopResults.map((loopResult, loopIndex) => ({
+            label: `Loop ${loopIndex + 1}`,
+            offsetsMs: loopResult.tapOffsetsMs,
+          })),
+        );
 
         renderSummaryCards(
           ui.summaryCards,

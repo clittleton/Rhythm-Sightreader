@@ -288,7 +288,7 @@ tbody tr.timing-bad td {
 }
 
 .timeline-area {
-  margin-top: 14px;
+  display: none;
 }
 
 #timelineStrip {
