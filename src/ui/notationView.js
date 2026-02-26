@@ -594,11 +594,12 @@ function mapTapMsToAnchorX(
   const firstExpectedMs = expectedOnsetsMs[0];
   const earlyVisualWindowMs = Math.max(140, Math.min(260, firstExpectedMs + 120));
   const earlyAnchorX = canUseBounds ? timelineBounds.startX : onsetAnchors[0].x - 34;
+  const firstSupportMs = Math.min(0, firstExpectedMs - earlyVisualWindowMs);
 
-  times.push(firstExpectedMs - earlyVisualWindowMs);
+  times.push(firstSupportMs);
   positions.push(earlyAnchorX);
 
-  if (canUseBounds && firstExpectedMs > 0) {
+  if (canUseBounds && firstExpectedMs > 0 && firstSupportMs !== 0) {
     times.push(0);
     positions.push(timelineBounds.startX);
   }
