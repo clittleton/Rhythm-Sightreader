@@ -20,6 +20,14 @@ const READABLE_CHUNKS = [
   { durationCode: "16", dots: 0, ticks: 120 },
 ];
 
+const LIVE_FEEDBACK_X_OFFSET_PX = 4;
+
+const NOOP_LIVE_FEEDBACK = {
+  flashTap: () => {},
+  flashMiss: () => {},
+  clear: () => {},
+};
+
 function assertVexFlow() {
   if (!window.Vex || !window.Vex.Flow) {
     throw new Error("VexFlow is not available.");
@@ -226,7 +234,7 @@ function applyDotsToNote(VF, staveNote, dotCount) {
 }
 
 function getAnalysisDotColor(offsetMs) {
-  if (offsetMs === null) {
+  if (typeof offsetMs !== "number" || Number.isNaN(offsetMs)) {
     return "#aa2e2e";
   }
 
@@ -240,13 +248,252 @@ function getAnalysisDotColor(offsetMs) {
   return "#aa2e2e";
 }
 
-function getAnalysisDotShiftPx(offsetMs) {
-  const clamped = Math.max(-220, Math.min(220, offsetMs));
-  return (clamped / 220) * 26;
+function getTimingBucket(offsetMs) {
+  if (typeof offsetMs !== "number" || Number.isNaN(offsetMs)) {
+    return "bad";
+  }
+  const abs = Math.abs(offsetMs);
+  if (abs <= 50) {
+    return "good";
+  }
+  if (abs <= 100) {
+    return "warn";
+  }
+  return "bad";
 }
 
-function drawNotationAnalysisRows(container, onsetAnchors, analysisRows) {
-  if (!Array.isArray(analysisRows) || analysisRows.length === 0 || onsetAnchors.length === 0) {
+function findNearestOnsetIndex(expectedOnsetsMs, tapMs) {
+  if (!expectedOnsetsMs.length) {
+    return -1;
+  }
+
+  let low = 0;
+  let high = expectedOnsetsMs.length - 1;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    if (expectedOnsetsMs[mid] < tapMs) {
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+
+  const leftIndex = Math.max(0, low - 1);
+  const rightIndex = Math.min(expectedOnsetsMs.length - 1, low);
+  const leftGap = Math.abs(tapMs - expectedOnsetsMs[leftIndex]);
+  const rightGap = Math.abs(tapMs - expectedOnsetsMs[rightIndex]);
+  return rightGap < leftGap ? rightIndex : leftIndex;
+}
+
+function addSvgAnimate(svgNs, element, attributeName, values, durationMs) {
+  const animate = document.createElementNS(svgNs, "animate");
+  animate.setAttribute("attributeName", attributeName);
+  animate.setAttribute("values", values);
+  animate.setAttribute("dur", `${durationMs}ms`);
+  animate.setAttribute("begin", "indefinite");
+  animate.setAttribute("fill", "freeze");
+  element.append(animate);
+  return animate;
+}
+
+function createLiveNoteFeedbackLayer(container, onsetAnchors, expectedOnsetsMs) {
+  if (
+    !Array.isArray(onsetAnchors) ||
+    onsetAnchors.length === 0 ||
+    !Array.isArray(expectedOnsetsMs) ||
+    expectedOnsetsMs.length === 0
+  ) {
+    return NOOP_LIVE_FEEDBACK;
+  }
+
+  const svg = container.querySelector("svg");
+  if (!svg) {
+    return NOOP_LIVE_FEEDBACK;
+  }
+
+  const svgNs = "http://www.w3.org/2000/svg";
+  const layer = document.createElementNS(svgNs, "g");
+  layer.setAttribute("class", "live-note-feedback-layer");
+  svg.append(layer);
+  const width = Number(svg.getAttribute("width")) || svg.clientWidth || 760;
+  const minBoundX = 18;
+  const maxBoundX = Math.max(minBoundX + 1, width - 18);
+
+  const flashTap = (tapMs, offsetMs) => {
+    const mappedX = mapTapMsToAnchorX(tapMs, expectedOnsetsMs, onsetAnchors);
+    if (mappedX === null) {
+      return;
+    }
+    const clampedX = Math.max(
+      minBoundX,
+      Math.min(maxBoundX, mappedX + LIVE_FEEDBACK_X_OFFSET_PX),
+    );
+    const nearestIndex = findNearestOnsetIndex(expectedOnsetsMs, tapMs);
+    const anchorY = onsetAnchors[nearestIndex]?.y ?? onsetAnchors[0].y;
+
+    const bucket = getTimingBucket(offsetMs);
+
+    const impactRing = document.createElementNS(svgNs, "circle");
+    impactRing.setAttribute("cx", String(clampedX));
+    impactRing.setAttribute("cy", String(anchorY));
+    impactRing.setAttribute("r", "4.4");
+    impactRing.setAttribute("class", `note-hit-impact ${bucket}`);
+    impactRing.setAttribute("opacity", "0.95");
+
+    const corePulse = document.createElementNS(svgNs, "circle");
+    corePulse.setAttribute("cx", String(clampedX));
+    corePulse.setAttribute("cy", String(anchorY));
+    corePulse.setAttribute("r", "3.4");
+    corePulse.setAttribute("class", `note-hit-core ${bucket}`);
+    corePulse.setAttribute("opacity", "0.95");
+
+    const impactAnimations = [
+      addSvgAnimate(svgNs, impactRing, "r", "4.4;12.2", 260),
+      addSvgAnimate(svgNs, impactRing, "opacity", "0.95;0", 260),
+    ];
+    const coreAnimations = [
+      addSvgAnimate(svgNs, corePulse, "r", "3.4;5.1;3.1", 180),
+      addSvgAnimate(svgNs, corePulse, "opacity", "0.95;0.78;0", 180),
+    ];
+
+    layer.append(impactRing);
+    layer.append(corePulse);
+
+    [...impactAnimations, ...coreAnimations].forEach((animation) => {
+      if (typeof animation.beginElement === "function") {
+        animation.beginElement();
+      }
+    });
+
+    setTimeout(() => {
+      impactRing.remove();
+      corePulse.remove();
+    }, 340);
+  };
+
+  const flashMiss = (expectedIndex) => {
+    const anchor = onsetAnchors[expectedIndex];
+    if (!anchor) {
+      return;
+    }
+
+    const x = Math.max(
+      minBoundX,
+      Math.min(maxBoundX, anchor.x + LIVE_FEEDBACK_X_OFFSET_PX),
+    );
+    const y = anchor.y;
+
+    const missHalo = document.createElementNS(svgNs, "circle");
+    missHalo.setAttribute("cx", String(x));
+    missHalo.setAttribute("cy", String(y));
+    missHalo.setAttribute("r", "7.2");
+    missHalo.setAttribute("class", "note-miss-halo");
+    missHalo.setAttribute("opacity", "0.9");
+
+    const missSlashA = document.createElementNS(svgNs, "line");
+    missSlashA.setAttribute("x1", String(x - 4.1));
+    missSlashA.setAttribute("y1", String(y - 4.1));
+    missSlashA.setAttribute("x2", String(x + 4.1));
+    missSlashA.setAttribute("y2", String(y + 4.1));
+    missSlashA.setAttribute("class", "note-miss-slash");
+    missSlashA.setAttribute("opacity", "0.95");
+
+    const missSlashB = document.createElementNS(svgNs, "line");
+    missSlashB.setAttribute("x1", String(x - 4.1));
+    missSlashB.setAttribute("y1", String(y + 4.1));
+    missSlashB.setAttribute("x2", String(x + 4.1));
+    missSlashB.setAttribute("y2", String(y - 4.1));
+    missSlashB.setAttribute("class", "note-miss-slash");
+    missSlashB.setAttribute("opacity", "0.95");
+
+    const animations = [
+      addSvgAnimate(svgNs, missHalo, "r", "7.2;9.4", 210),
+      addSvgAnimate(svgNs, missHalo, "opacity", "0.9;0", 230),
+      addSvgAnimate(svgNs, missSlashA, "opacity", "0.95;0", 220),
+      addSvgAnimate(svgNs, missSlashB, "opacity", "0.95;0", 220),
+    ];
+
+    layer.append(missHalo);
+    layer.append(missSlashA);
+    layer.append(missSlashB);
+
+    animations.forEach((animation) => {
+      if (typeof animation.beginElement === "function") {
+        animation.beginElement();
+      }
+    });
+
+    setTimeout(() => {
+      missHalo.remove();
+      missSlashA.remove();
+      missSlashB.remove();
+    }, 280);
+  };
+
+  return {
+    flashTap,
+    flashMiss,
+    clear: () => {
+      layer.innerHTML = "";
+    },
+  };
+}
+
+function mapTapMsToAnchorX(tapMs, expectedOnsetsMs, onsetAnchors) {
+  const count = Math.min(expectedOnsetsMs.length, onsetAnchors.length);
+  if (count === 0) {
+    return null;
+  }
+
+  if (count === 1) {
+    return onsetAnchors[0].x;
+  }
+
+  let leftIndex = 0;
+  let rightIndex = 1;
+
+  if (tapMs <= expectedOnsetsMs[0]) {
+    leftIndex = 0;
+    rightIndex = 1;
+  } else if (tapMs >= expectedOnsetsMs[count - 1]) {
+    leftIndex = count - 2;
+    rightIndex = count - 1;
+  } else {
+    let low = 0;
+    let high = count - 1;
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      if (expectedOnsetsMs[mid] < tapMs) {
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    rightIndex = Math.max(1, low);
+    leftIndex = rightIndex - 1;
+  }
+
+  const startMs = expectedOnsetsMs[leftIndex];
+  const endMs = expectedOnsetsMs[rightIndex];
+  const startX = onsetAnchors[leftIndex].x;
+  const endX = onsetAnchors[rightIndex].x;
+
+  const spanMs = Math.max(1, endMs - startMs);
+  const ratio = (tapMs - startMs) / spanMs;
+  const interpolated = startX + (endX - startX) * ratio;
+  const minX = Math.min(startX, endX) - 34;
+  const maxX = Math.max(startX, endX) + 34;
+  return Math.max(minX, Math.min(maxX, interpolated));
+}
+
+function drawNotationAnalysisRows(container, onsetAnchors, expectedOnsetsMs, analysisRows) {
+  if (
+    !Array.isArray(analysisRows) ||
+    analysisRows.length === 0 ||
+    onsetAnchors.length === 0 ||
+    !Array.isArray(expectedOnsetsMs) ||
+    expectedOnsetsMs.length === 0
+  ) {
     return;
   }
 
@@ -258,6 +505,9 @@ function drawNotationAnalysisRows(container, onsetAnchors, analysisRows) {
   const svgNs = "http://www.w3.org/2000/svg";
   const layer = document.createElementNS(svgNs, "g");
   layer.setAttribute("class", "analysis-dots-layer");
+  const width = Number(svg.getAttribute("width")) || svg.clientWidth || 760;
+  const minBoundX = 18;
+  const maxBoundX = Math.max(minBoundX + 1, width - 18);
 
   const baseY = Math.max(...onsetAnchors.map((anchor) => anchor.y)) + 24;
   const rowSpacing = 22;
@@ -276,32 +526,41 @@ function drawNotationAnalysisRows(container, onsetAnchors, analysisRows) {
       layer.append(label);
     }
 
-    onsetAnchors.forEach((anchor, noteIndex) => {
-      const offsetMs = row.offsetsMs[noteIndex] ?? null;
-
-      if (offsetMs === null) {
-        const miss = document.createElementNS(svgNs, "text");
-        miss.setAttribute("x", String(anchor.x));
-        miss.setAttribute("y", String(rowY + 3));
-        miss.setAttribute("text-anchor", "middle");
-        miss.setAttribute("font-size", "11");
-        miss.setAttribute("font-family", "Space Grotesk, sans-serif");
-        miss.setAttribute("fill", "#aa2e2e");
-        miss.textContent = "X";
-        layer.append(miss);
+    const tapEvents = Array.isArray(row.tapEvents) ? row.tapEvents : [];
+    tapEvents.forEach((tapEvent) => {
+      const mappedX = mapTapMsToAnchorX(tapEvent.tapMs, expectedOnsetsMs, onsetAnchors);
+      if (mappedX === null) {
         return;
       }
-
       const dot = document.createElementNS(svgNs, "circle");
-      dot.setAttribute("cx", String(anchor.x + getAnalysisDotShiftPx(offsetMs)));
+      dot.setAttribute("cx", String(Math.max(minBoundX, Math.min(maxBoundX, mappedX))));
       dot.setAttribute("cy", String(rowY));
       dot.setAttribute("r", "4.8");
-      dot.setAttribute("fill", getAnalysisDotColor(offsetMs));
-      dot.setAttribute("stroke", "#ffffff");
-      dot.setAttribute("stroke-width", "0.8");
+      dot.setAttribute("fill", getAnalysisDotColor(tapEvent.offsetMs));
+      dot.setAttribute("stroke", tapEvent.isExtra ? "#16353a" : "#ffffff");
+      dot.setAttribute("stroke-width", tapEvent.isExtra ? "1.3" : "0.8");
       dot.setAttribute("opacity", "0.94");
-      dot.setAttribute("data-offset-ms", String(offsetMs));
+      dot.setAttribute("data-offset-ms", String(tapEvent.offsetMs));
       layer.append(dot);
+    });
+
+    const missedExpectedIndices = Array.isArray(row.missedExpectedIndices)
+      ? row.missedExpectedIndices
+      : [];
+    missedExpectedIndices.forEach((expectedIndex) => {
+      const anchor = onsetAnchors[expectedIndex];
+      if (!anchor) {
+        return;
+      }
+      const miss = document.createElementNS(svgNs, "text");
+      miss.setAttribute("x", String(anchor.x));
+      miss.setAttribute("y", String(rowY + 3));
+      miss.setAttribute("text-anchor", "middle");
+      miss.setAttribute("font-size", "11");
+      miss.setAttribute("font-family", "Space Grotesk, sans-serif");
+      miss.setAttribute("fill", "#aa2e2e");
+      miss.textContent = "X";
+      layer.append(miss);
     });
   });
 
@@ -311,7 +570,7 @@ function drawNotationAnalysisRows(container, onsetAnchors, analysisRows) {
 export function renderNotation(container, exercise, analysisRows = []) {
   if (!exercise) {
     container.innerHTML = "";
-    return;
+    return NOOP_LIVE_FEEDBACK;
   }
 
   let VF;
@@ -319,7 +578,7 @@ export function renderNotation(container, exercise, analysisRows = []) {
     VF = assertVexFlow();
   } catch (error) {
     renderFallback(container, error.message);
-    return;
+    return NOOP_LIVE_FEEDBACK;
   }
 
   container.innerHTML = "";
@@ -442,5 +701,11 @@ export function renderNotation(container, exercise, analysisRows = []) {
   });
 
   tiesToDraw.forEach((tie) => tie.setContext(context).draw());
-  drawNotationAnalysisRows(container, onsetAnchors, analysisRows);
+  const liveNoteFeedback = createLiveNoteFeedbackLayer(
+    container,
+    onsetAnchors,
+    exercise.expectedOnsetsMs,
+  );
+  drawNotationAnalysisRows(container, onsetAnchors, exercise.expectedOnsetsMs, analysisRows);
+  return liveNoteFeedback;
 }

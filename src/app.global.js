@@ -242,6 +242,12 @@
       applySyncopationWithinMeasure(tokens, measureStartTick, levelConfig.syncopationRate || 0.2);
     }
 
+    if (!tokens.some(function (token) {
+      return !token.isRest;
+    })) {
+      throw new Error("Generated silent measure.");
+    }
+
     return tokens;
   }
 
@@ -274,7 +280,7 @@
   }
 
   function generateExercise(levelConfig) {
-    for (let attempt = 0; attempt < 80; attempt += 1) {
+    for (let attempt = 0; attempt < 240; attempt += 1) {
       const timeSignature = chooseTimeSignature(levelConfig);
       const tempoBpm = chooseTempo(levelConfig);
       const measureTicks = getMeasureTicks(timeSignature);
@@ -291,12 +297,17 @@
         continue;
       }
 
+      const expectedOnsetsMs = buildExpectedOnsetsMs(notes, tempoBpm);
+      if (!expectedOnsetsMs.length) {
+        continue;
+      }
+
       return {
         level: levelConfig.id,
         timeSignature: timeSignature,
         tempoBpm: tempoBpm,
         notes: notes,
-        expectedOnsetsMs: buildExpectedOnsetsMs(notes, tempoBpm),
+        expectedOnsetsMs: expectedOnsetsMs,
         measureTicks: measureTicks,
         measuresPerExercise: levelConfig.measuresPerExercise,
         totalDurationMs: getExerciseDurationMs(notes, tempoBpm),
@@ -661,6 +672,14 @@
     { durationCode: "16", dots: 0, ticks: 120 },
   ];
 
+  const LIVE_FEEDBACK_X_OFFSET_PX = 4;
+
+  const NOOP_LIVE_FEEDBACK = {
+    flashTap: function () {},
+    flashMiss: function () {},
+    clear: function () {},
+  };
+
   function getBeamGroups(VF, timeSignature) {
     const num = timeSignature.num;
     const den = timeSignature.den;
@@ -853,7 +872,7 @@
   }
 
   function getAnalysisDotColor(offsetMs) {
-    if (offsetMs === null) {
+    if (typeof offsetMs !== "number" || Number.isNaN(offsetMs)) {
       return "#aa2e2e";
     }
     const abs = Math.abs(offsetMs);
@@ -866,13 +885,249 @@
     return "#aa2e2e";
   }
 
-  function getAnalysisDotShiftPx(offsetMs) {
-    const clamped = Math.max(-220, Math.min(220, offsetMs));
-    return (clamped / 220) * 26;
+  function getTimingBucket(offsetMs) {
+    if (typeof offsetMs !== "number" || Number.isNaN(offsetMs)) {
+      return "bad";
+    }
+    const abs = Math.abs(offsetMs);
+    if (abs <= 50) {
+      return "good";
+    }
+    if (abs <= 100) {
+      return "warn";
+    }
+    return "bad";
   }
 
-  function drawNotationAnalysisRows(container, onsetAnchors, analysisRows) {
-    if (!Array.isArray(analysisRows) || !analysisRows.length || !onsetAnchors.length) {
+  function findNearestOnsetIndex(expectedOnsetsMs, tapMs) {
+    if (!expectedOnsetsMs.length) {
+      return -1;
+    }
+
+    let low = 0;
+    let high = expectedOnsetsMs.length - 1;
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      if (expectedOnsetsMs[mid] < tapMs) {
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+
+    const leftIndex = Math.max(0, low - 1);
+    const rightIndex = Math.min(expectedOnsetsMs.length - 1, low);
+    const leftGap = Math.abs(tapMs - expectedOnsetsMs[leftIndex]);
+    const rightGap = Math.abs(tapMs - expectedOnsetsMs[rightIndex]);
+    return rightGap < leftGap ? rightIndex : leftIndex;
+  }
+
+  function addSvgAnimate(svgNs, element, attributeName, values, durationMs) {
+    const animate = document.createElementNS(svgNs, "animate");
+    animate.setAttribute("attributeName", attributeName);
+    animate.setAttribute("values", values);
+    animate.setAttribute("dur", durationMs + "ms");
+    animate.setAttribute("begin", "indefinite");
+    animate.setAttribute("fill", "freeze");
+    element.append(animate);
+    return animate;
+  }
+
+  function createLiveNoteFeedbackLayer(container, onsetAnchors, expectedOnsetsMs) {
+    if (
+      !Array.isArray(onsetAnchors) ||
+      !onsetAnchors.length ||
+      !Array.isArray(expectedOnsetsMs) ||
+      !expectedOnsetsMs.length
+    ) {
+      return NOOP_LIVE_FEEDBACK;
+    }
+
+    const svg = container.querySelector("svg");
+    if (!svg) {
+      return NOOP_LIVE_FEEDBACK;
+    }
+
+    const svgNs = "http://www.w3.org/2000/svg";
+    const layer = document.createElementNS(svgNs, "g");
+    layer.setAttribute("class", "live-note-feedback-layer");
+    svg.append(layer);
+    const width = Number(svg.getAttribute("width")) || svg.clientWidth || 760;
+    const minBoundX = 18;
+    const maxBoundX = Math.max(minBoundX + 1, width - 18);
+
+    const flashTap = function (tapMs, offsetMs) {
+      const mappedX = mapTapMsToAnchorX(tapMs, expectedOnsetsMs, onsetAnchors);
+      if (mappedX === null) {
+        return;
+      }
+      const clampedX = Math.max(
+        minBoundX,
+        Math.min(maxBoundX, mappedX + LIVE_FEEDBACK_X_OFFSET_PX),
+      );
+      const nearestIndex = findNearestOnsetIndex(expectedOnsetsMs, tapMs);
+      const anchorY = onsetAnchors[nearestIndex] ? onsetAnchors[nearestIndex].y : onsetAnchors[0].y;
+
+      const bucket = getTimingBucket(offsetMs);
+
+      const impactRing = document.createElementNS(svgNs, "circle");
+      impactRing.setAttribute("cx", String(clampedX));
+      impactRing.setAttribute("cy", String(anchorY));
+      impactRing.setAttribute("r", "4.4");
+      impactRing.setAttribute("class", "note-hit-impact " + bucket);
+      impactRing.setAttribute("opacity", "0.95");
+
+      const corePulse = document.createElementNS(svgNs, "circle");
+      corePulse.setAttribute("cx", String(clampedX));
+      corePulse.setAttribute("cy", String(anchorY));
+      corePulse.setAttribute("r", "3.4");
+      corePulse.setAttribute("class", "note-hit-core " + bucket);
+      corePulse.setAttribute("opacity", "0.95");
+
+      const impactAnimations = [
+        addSvgAnimate(svgNs, impactRing, "r", "4.4;12.2", 260),
+        addSvgAnimate(svgNs, impactRing, "opacity", "0.95;0", 260),
+      ];
+      const coreAnimations = [
+        addSvgAnimate(svgNs, corePulse, "r", "3.4;5.1;3.1", 180),
+        addSvgAnimate(svgNs, corePulse, "opacity", "0.95;0.78;0", 180),
+      ];
+
+      layer.append(impactRing);
+      layer.append(corePulse);
+
+      impactAnimations.concat(coreAnimations).forEach(function (animation) {
+        if (typeof animation.beginElement === "function") {
+          animation.beginElement();
+        }
+      });
+
+      setTimeout(function () {
+        impactRing.remove();
+        corePulse.remove();
+      }, 340);
+    };
+
+    const flashMiss = function (expectedIndex) {
+      const anchor = onsetAnchors[expectedIndex];
+      if (!anchor) {
+        return;
+      }
+
+      const x = Math.max(
+        minBoundX,
+        Math.min(maxBoundX, anchor.x + LIVE_FEEDBACK_X_OFFSET_PX),
+      );
+      const y = anchor.y;
+
+      const missHalo = document.createElementNS(svgNs, "circle");
+      missHalo.setAttribute("cx", String(x));
+      missHalo.setAttribute("cy", String(y));
+      missHalo.setAttribute("r", "7.2");
+      missHalo.setAttribute("class", "note-miss-halo");
+      missHalo.setAttribute("opacity", "0.9");
+
+      const missSlashA = document.createElementNS(svgNs, "line");
+      missSlashA.setAttribute("x1", String(x - 4.1));
+      missSlashA.setAttribute("y1", String(y - 4.1));
+      missSlashA.setAttribute("x2", String(x + 4.1));
+      missSlashA.setAttribute("y2", String(y + 4.1));
+      missSlashA.setAttribute("class", "note-miss-slash");
+      missSlashA.setAttribute("opacity", "0.95");
+
+      const missSlashB = document.createElementNS(svgNs, "line");
+      missSlashB.setAttribute("x1", String(x - 4.1));
+      missSlashB.setAttribute("y1", String(y + 4.1));
+      missSlashB.setAttribute("x2", String(x + 4.1));
+      missSlashB.setAttribute("y2", String(y - 4.1));
+      missSlashB.setAttribute("class", "note-miss-slash");
+      missSlashB.setAttribute("opacity", "0.95");
+
+      const animations = [
+        addSvgAnimate(svgNs, missHalo, "r", "7.2;9.4", 210),
+        addSvgAnimate(svgNs, missHalo, "opacity", "0.9;0", 230),
+        addSvgAnimate(svgNs, missSlashA, "opacity", "0.95;0", 220),
+        addSvgAnimate(svgNs, missSlashB, "opacity", "0.95;0", 220),
+      ];
+
+      layer.append(missHalo);
+      layer.append(missSlashA);
+      layer.append(missSlashB);
+
+      animations.forEach(function (animation) {
+        if (typeof animation.beginElement === "function") {
+          animation.beginElement();
+        }
+      });
+
+      setTimeout(function () {
+        missHalo.remove();
+        missSlashA.remove();
+        missSlashB.remove();
+      }, 280);
+    };
+
+    return {
+      flashTap: flashTap,
+      flashMiss: flashMiss,
+      clear: function () {
+        layer.innerHTML = "";
+      },
+    };
+  }
+
+  function mapTapMsToAnchorX(tapMs, expectedOnsetsMs, onsetAnchors) {
+    const count = Math.min(expectedOnsetsMs.length, onsetAnchors.length);
+    if (count === 0) {
+      return null;
+    }
+    if (count === 1) {
+      return onsetAnchors[0].x;
+    }
+
+    let leftIndex = 0;
+    let rightIndex = 1;
+    if (tapMs <= expectedOnsetsMs[0]) {
+      leftIndex = 0;
+      rightIndex = 1;
+    } else if (tapMs >= expectedOnsetsMs[count - 1]) {
+      leftIndex = count - 2;
+      rightIndex = count - 1;
+    } else {
+      let low = 0;
+      let high = count - 1;
+      while (low <= high) {
+        const mid = Math.floor((low + high) / 2);
+        if (expectedOnsetsMs[mid] < tapMs) {
+          low = mid + 1;
+        } else {
+          high = mid - 1;
+        }
+      }
+      rightIndex = Math.max(1, low);
+      leftIndex = rightIndex - 1;
+    }
+
+    const startMs = expectedOnsetsMs[leftIndex];
+    const endMs = expectedOnsetsMs[rightIndex];
+    const startX = onsetAnchors[leftIndex].x;
+    const endX = onsetAnchors[rightIndex].x;
+    const spanMs = Math.max(1, endMs - startMs);
+    const ratio = (tapMs - startMs) / spanMs;
+    const interpolated = startX + (endX - startX) * ratio;
+    const minX = Math.min(startX, endX) - 34;
+    const maxX = Math.max(startX, endX) + 34;
+    return Math.max(minX, Math.min(maxX, interpolated));
+  }
+
+  function drawNotationAnalysisRows(container, onsetAnchors, expectedOnsetsMs, analysisRows) {
+    if (
+      !Array.isArray(analysisRows) ||
+      !analysisRows.length ||
+      !onsetAnchors.length ||
+      !Array.isArray(expectedOnsetsMs) ||
+      !expectedOnsetsMs.length
+    ) {
       return;
     }
 
@@ -884,6 +1139,9 @@
     const svgNs = "http://www.w3.org/2000/svg";
     const layer = document.createElementNS(svgNs, "g");
     layer.setAttribute("class", "analysis-dots-layer");
+    const width = Number(svg.getAttribute("width")) || svg.clientWidth || 760;
+    const minBoundX = 18;
+    const maxBoundX = Math.max(minBoundX + 1, width - 18);
 
     const baseY = Math.max(...onsetAnchors.map((anchor) => anchor.y)) + 24;
     const rowSpacing = 22;
@@ -902,32 +1160,41 @@
         layer.append(label);
       }
 
-      onsetAnchors.forEach(function (anchor, noteIndex) {
-        const offsetMs = row.offsetsMs[noteIndex] ?? null;
-
-        if (offsetMs === null) {
-          const miss = document.createElementNS(svgNs, "text");
-          miss.setAttribute("x", String(anchor.x));
-          miss.setAttribute("y", String(rowY + 3));
-          miss.setAttribute("text-anchor", "middle");
-          miss.setAttribute("font-size", "11");
-          miss.setAttribute("font-family", "Space Grotesk, sans-serif");
-          miss.setAttribute("fill", "#aa2e2e");
-          miss.textContent = "X";
-          layer.append(miss);
+      const tapEvents = Array.isArray(row.tapEvents) ? row.tapEvents : [];
+      tapEvents.forEach(function (tapEvent) {
+        const mappedX = mapTapMsToAnchorX(tapEvent.tapMs, expectedOnsetsMs, onsetAnchors);
+        if (mappedX === null) {
           return;
         }
-
         const dot = document.createElementNS(svgNs, "circle");
-        dot.setAttribute("cx", String(anchor.x + getAnalysisDotShiftPx(offsetMs)));
+        dot.setAttribute("cx", String(Math.max(minBoundX, Math.min(maxBoundX, mappedX))));
         dot.setAttribute("cy", String(rowY));
         dot.setAttribute("r", "4.8");
-        dot.setAttribute("fill", getAnalysisDotColor(offsetMs));
-        dot.setAttribute("stroke", "#ffffff");
-        dot.setAttribute("stroke-width", "0.8");
+        dot.setAttribute("fill", getAnalysisDotColor(tapEvent.offsetMs));
+        dot.setAttribute("stroke", tapEvent.isExtra ? "#16353a" : "#ffffff");
+        dot.setAttribute("stroke-width", tapEvent.isExtra ? "1.3" : "0.8");
         dot.setAttribute("opacity", "0.94");
-        dot.setAttribute("data-offset-ms", String(offsetMs));
+        dot.setAttribute("data-offset-ms", String(tapEvent.offsetMs));
         layer.append(dot);
+      });
+
+      const missedExpectedIndices = Array.isArray(row.missedExpectedIndices)
+        ? row.missedExpectedIndices
+        : [];
+      missedExpectedIndices.forEach(function (expectedIndex) {
+        const anchor = onsetAnchors[expectedIndex];
+        if (!anchor) {
+          return;
+        }
+        const miss = document.createElementNS(svgNs, "text");
+        miss.setAttribute("x", String(anchor.x));
+        miss.setAttribute("y", String(rowY + 3));
+        miss.setAttribute("text-anchor", "middle");
+        miss.setAttribute("font-size", "11");
+        miss.setAttribute("font-family", "Space Grotesk, sans-serif");
+        miss.setAttribute("fill", "#aa2e2e");
+        miss.textContent = "X";
+        layer.append(miss);
       });
     });
 
@@ -937,7 +1204,7 @@
   function renderNotation(container, exercise, analysisRows) {
     if (!exercise) {
       container.innerHTML = "";
-      return;
+      return NOOP_LIVE_FEEDBACK;
     }
 
     let VF;
@@ -945,7 +1212,7 @@
       VF = assertVexFlow();
     } catch (error) {
       renderFallback(container, error.message);
-      return;
+      return NOOP_LIVE_FEEDBACK;
     }
 
     container.innerHTML = "";
@@ -1070,7 +1337,13 @@
     tiesToDraw.forEach(function (tie) {
       tie.setContext(context).draw();
     });
-    drawNotationAnalysisRows(container, onsetAnchors, analysisRows || []);
+    const liveNoteFeedback = createLiveNoteFeedbackLayer(
+      container,
+      onsetAnchors,
+      exercise.expectedOnsetsMs,
+    );
+    drawNotationAnalysisRows(container, onsetAnchors, exercise.expectedOnsetsMs, analysisRows || []);
+    return liveNoteFeedback;
   }
 
   function Metronome() {
@@ -1112,7 +1385,7 @@
       if (!AudioContextRef) {
         return;
       }
-      this.audioContext = new AudioContextRef();
+      this.audioContext = new AudioContextRef({ latencyHint: "interactive" });
     }
 
     if (this.audioContext.state === "suspended") {
@@ -1146,37 +1419,80 @@
     return 0;
   };
 
-  Metronome.prototype.tick = function (accent) {
-    const isAccent = !!accent;
-    if (this.isToneReady && this.toneSynth) {
-      const note = this.soundMode === "tick" ? (isAccent ? "G6" : "D6") : isAccent ? "F6" : "C6";
-      const immediateTime =
-        window.Tone && typeof window.Tone.immediate === "function"
-          ? window.Tone.immediate()
-          : undefined;
-      this.toneSynth.triggerAttackRelease(note, 0.02, immediateTime);
-      return;
+  Metronome.prototype.getTapAudioContext = function () {
+    const toneRaw =
+      window.Tone && window.Tone.getContext ? window.Tone.getContext()?.rawContext : null;
+    if (toneRaw) {
+      return toneRaw;
     }
+    return this.audioContext;
+  };
 
-    if (!this.audioContext) {
-      return;
+  Metronome.prototype.triggerToneToneJs = function (note, durationSeconds) {
+    const duration = typeof durationSeconds === "number" ? durationSeconds : 0.02;
+    if (!this.isToneReady || !this.toneSynth) {
+      return false;
     }
+    const immediateTime =
+      window.Tone && typeof window.Tone.immediate === "function"
+        ? window.Tone.immediate()
+        : undefined;
+    this.toneSynth.triggerAttackRelease(note, duration, immediateTime);
+    return true;
+  };
 
-    const now = this.audioContext.currentTime;
-    const osc = this.audioContext.createOscillator();
-    const gain = this.audioContext.createGain();
+  Metronome.prototype.triggerToneWebAudio = function (args) {
+    const context = args.context || this.audioContext;
+    if (!context) {
+      return false;
+    }
+    const frequency = args.frequency;
+    const accent = !!args.accent;
+    const durationSeconds =
+      typeof args.durationSeconds === "number" ? args.durationSeconds : 0.018;
+
+    const now = context.currentTime;
+    const osc = context.createOscillator();
+    const gain = context.createGain();
 
     osc.type = this.soundMode === "tick" ? "sine" : "square";
-    osc.frequency.value =
-      this.soundMode === "tick" ? (isAccent ? 1960 : 1480) : isAccent ? 1760 : 1320;
+    osc.frequency.value = frequency;
     gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.exponentialRampToValueAtTime(isAccent ? 0.18 : 0.12, now + 0.0015);
-    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.015);
+    gain.gain.exponentialRampToValueAtTime(accent ? 0.18 : 0.12, now + 0.0015);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + durationSeconds);
 
     osc.connect(gain);
-    gain.connect(this.audioContext.destination);
+    gain.connect(context.destination);
     osc.start(now);
-    osc.stop(now + 0.018);
+    osc.stop(now + durationSeconds + 0.003);
+    return true;
+  };
+
+  Metronome.prototype.tapFeedback = function () {
+    const context = this.getTapAudioContext();
+    const freq = this.soundMode === "tick" ? 1480 : 1760;
+    this.triggerToneWebAudio({
+      frequency: freq,
+      accent: false,
+      durationSeconds: 0.01,
+      context: context,
+    });
+  };
+
+  Metronome.prototype.tick = function (accent) {
+    const isAccent = !!accent;
+    const note = this.soundMode === "tick" ? (isAccent ? "G6" : "D6") : isAccent ? "F6" : "C6";
+    if (this.triggerToneToneJs(note, 0.02)) {
+      return;
+    }
+
+    const freq =
+      this.soundMode === "tick" ? (isAccent ? 1960 : 1480) : isAccent ? 1760 : 1320;
+    this.triggerToneWebAudio({
+      frequency: freq,
+      accent: isAccent,
+      durationSeconds: 0.015,
+    });
   };
 
   function TimingEngine(args) {
@@ -1185,6 +1501,10 @@
     this.session = null;
     this.timeouts = new Set();
   }
+
+  TimingEngine.prototype.isTapWindowOpen = function () {
+    return this.state === "performing";
+  };
 
   TimingEngine.prototype.shouldTrapSpacebar = function () {
     return this.state === "count-in" || this.state === "performing";
@@ -1201,6 +1521,27 @@
     this.clearTimers();
     this.state = "idle";
     this.session = null;
+  };
+
+  TimingEngine.prototype.cancel = function (reason) {
+    const cancelReason = reason || "user";
+    if (!this.session || (this.state !== "count-in" && this.state !== "performing")) {
+      return false;
+    }
+
+    const snapshot = this.session.loopTapsMs.map(function (loopTaps) {
+      return loopTaps.slice();
+    });
+    const onStateChange = this.session.onStateChange;
+    const onCancel = this.session.onCancel;
+    const phase = this.state;
+
+    this.clearTimers();
+    this.state = "cancelled";
+    onStateChange(this.state);
+    this.stop();
+    onCancel({ loopTapsMs: snapshot, phase: phase, reason: cancelReason });
+    return true;
   };
 
   TimingEngine.prototype.schedule = function (msFromNow, fn) {
@@ -1223,6 +1564,7 @@
     const onLoopStart = args.onLoopStart || function () {};
     const onTap = args.onTap || function () {};
     const onComplete = args.onComplete || function () {};
+    const onCancel = args.onCancel || function () {};
 
     const beatsPerMeasure = exercise.timeSignature.num;
     const beatMs = (60000 / exercise.tempoBpm) * (4 / exercise.timeSignature.den);
@@ -1230,7 +1572,6 @@
     const singleLoopMs = exercise.totalDurationMs;
     const performanceMs = singleLoopMs * loops;
     const totalMs = countInMs + performanceMs;
-    const sessionStart = performance.now();
 
     this.session = {
       loopTapsMs: Array.from({ length: loops }, function () {
@@ -1241,7 +1582,10 @@
       latencyCompensationMs: latencyCompensationMs,
       performanceStart: null,
       performanceEnd: null,
+      totalTapCount: 0,
       onTap: onTap,
+      onCancel: onCancel,
+      onStateChange: onStateChange,
     };
 
     this.state = "count-in";
@@ -1318,7 +1662,14 @@
     const withinLoopMs = elapsedSincePerfStart - loopIndex * this.session.singleLoopMs;
     const compensatedTapMs = Math.round(withinLoopMs - this.session.latencyCompensationMs);
     this.session.loopTapsMs[loopIndex].push(compensatedTapMs);
-    this.session.onTap({ loop: loopIndex + 1, withinLoopMs: compensatedTapMs });
+    this.session.totalTapCount += 1;
+    this.session.onTap({
+      loop: loopIndex + 1,
+      loopIndex: loopIndex,
+      withinLoopMs: compensatedTapMs,
+      tapIndexInLoop: this.session.loopTapsMs[loopIndex].length,
+      totalTapCount: this.session.totalTapCount,
+    });
     return true;
   };
 
@@ -1327,6 +1678,7 @@
     generateBtn: document.getElementById("generateBtn"),
     startBtn: document.getElementById("startBtn"),
     loopBtn: document.getElementById("loopBtn"),
+    cancelBtn: document.getElementById("cancelBtn"),
     tempoSlider: document.getElementById("tempoSlider"),
     tempoInput: document.getElementById("tempoInput"),
     clickSoundSelect: document.getElementById("clickSoundSelect"),
@@ -1341,6 +1693,8 @@
     loopBreakdown: document.getElementById("loopBreakdown"),
     feedbackTableBody: document.getElementById("feedbackTableBody"),
     timelineStrip: document.getElementById("timelineStrip"),
+    liveTimingFeedback: document.getElementById("liveTimingFeedback"),
+    liveTimingText: document.getElementById("liveTimingText"),
   };
 
   const metronome = new Metronome();
@@ -1351,6 +1705,8 @@
     loopTapSets: [],
     loopResults: [],
     selectedTempoBpm: null,
+    isSessionActive: false,
+    isSpaceHeld: false,
   };
 
   function clampTempo(value) {
@@ -1377,11 +1733,134 @@
     ui.startBtn.disabled = disabled;
     ui.loopBtn.disabled = disabled;
     ui.levelSelect.disabled = disabled;
+    ui.cancelBtn.disabled = !disabled;
   }
 
   function setBeatIndicator(active, label) {
     ui.beatIndicator.classList.toggle("active", !!active);
     ui.beatText.textContent = label;
+  }
+
+  function timingClassFromOffset(offsetMs) {
+    const abs = Math.abs(offsetMs);
+    if (abs <= 50) {
+      return "timing-good";
+    }
+    if (abs <= 100) {
+      return "timing-warn";
+    }
+    return "timing-bad";
+  }
+
+  function timingWordsFromOffset(offsetMs) {
+    const rounded = Math.round(offsetMs);
+    if (rounded < 0) {
+      return "Early " + Math.abs(rounded) + " ms";
+    }
+    if (rounded > 0) {
+      return "Late " + rounded + " ms";
+    }
+    return "On time";
+  }
+
+  function resetLiveTimingFeedback(message) {
+    const text = message || "Waiting for first tap";
+    if (!ui.liveTimingFeedback || !ui.liveTimingText) {
+      return;
+    }
+    ui.liveTimingFeedback.classList.remove("timing-good", "timing-warn", "timing-bad", "timing-extra");
+    ui.liveTimingText.textContent = text;
+  }
+
+  function setLiveTimingFeedback(args) {
+    const offsetMs = args.offsetMs;
+    const isExtra = !!args.isExtra;
+    if (!ui.liveTimingFeedback || !ui.liveTimingText) {
+      return;
+    }
+    ui.liveTimingFeedback.classList.remove("timing-good", "timing-warn", "timing-bad", "timing-extra");
+    ui.liveTimingFeedback.classList.add(timingClassFromOffset(offsetMs));
+    if (isExtra) {
+      ui.liveTimingFeedback.classList.add("timing-extra");
+    }
+    const timingText = timingWordsFromOffset(offsetMs);
+    ui.liveTimingText.textContent = isExtra ? "Extra tap: " + timingText : timingText;
+  }
+
+  function findNearestExpectedOffset(expectedOnsetsMs, tapMs) {
+    if (!expectedOnsetsMs.length) {
+      return { expectedIndex: -1, offsetMs: 0 };
+    }
+
+    let low = 0;
+    let high = expectedOnsetsMs.length - 1;
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      if (expectedOnsetsMs[mid] < tapMs) {
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+
+    const leftIndex = Math.max(0, low - 1);
+    const rightIndex = Math.min(expectedOnsetsMs.length - 1, low);
+    const leftGap = Math.abs(tapMs - expectedOnsetsMs[leftIndex]);
+    const rightGap = Math.abs(tapMs - expectedOnsetsMs[rightIndex]);
+    const expectedIndex = rightGap < leftGap ? rightIndex : leftIndex;
+    return {
+      expectedIndex: expectedIndex,
+      offsetMs: Math.round(tapMs - expectedOnsetsMs[expectedIndex]),
+    };
+  }
+
+  function getMissCheckDelayMs(expectedOnsetsMs, expectedIndex) {
+    const expectedMs = expectedOnsetsMs[expectedIndex];
+    const nextMs = expectedOnsetsMs[expectedIndex + 1];
+    if (typeof nextMs === "number") {
+      const gapMs = Math.max(1, nextMs - expectedMs);
+      return Math.max(120, Math.min(320, Math.round(gapMs * 0.72)));
+    }
+    return 240;
+  }
+
+  function buildNotationAnalysisRow(label, expectedOnsetsMs, tapsMs, result) {
+    const expectedByTapIndex = new Map();
+    result.matchedTapIndices.forEach(function (tapIndex, expectedIndex) {
+      if (tapIndex >= 0) {
+        expectedByTapIndex.set(tapIndex, expectedIndex);
+      }
+    });
+
+    const tapEvents = tapsMs.map(function (tapMs, tapIndex) {
+      const expectedIndex = expectedByTapIndex.get(tapIndex);
+      if (expectedIndex !== undefined) {
+        return {
+          tapMs: tapMs,
+          offsetMs: Math.round(tapMs - expectedOnsetsMs[expectedIndex]),
+          isExtra: false,
+        };
+      }
+      const nearest = findNearestExpectedOffset(expectedOnsetsMs, tapMs);
+      return {
+        tapMs: tapMs,
+        offsetMs: nearest.offsetMs,
+        isExtra: true,
+      };
+    });
+
+    const missedExpectedIndices = result.matchedTapIndices.reduce(function (indices, tapIndex, expectedIndex) {
+      if (tapIndex === -1) {
+        indices.push(expectedIndex);
+      }
+      return indices;
+    }, []);
+
+    return {
+      label: label,
+      tapEvents: tapEvents,
+      missedExpectedIndices: missedExpectedIndices,
+    };
   }
 
   function populateLevelSelector() {
@@ -1441,8 +1920,24 @@
   }
 
   function generateNewExercise() {
+    if (appState.isSessionActive) {
+      return;
+    }
+
     const levelConfig = currentLevelConfig();
-    appState.exercise = generateExercise(levelConfig);
+    try {
+      appState.exercise = generateExercise(levelConfig);
+    } catch (error) {
+      appState.exercise = null;
+      resetResults();
+      renderNotation(ui.notationContainer, null, []);
+      setStatus("Error");
+      setBeatIndicator(false, "Error");
+      setTapStatus("Generation failed: " + error.message);
+      resetLiveTimingFeedback("No exercise loaded");
+      return;
+    }
+
     if (appState.selectedTempoBpm !== null) {
       applyTempoToExercise(appState.selectedTempoBpm, "system");
     } else {
@@ -1453,6 +1948,7 @@
     setStatus("Ready");
     setBeatIndicator(false, "Ready");
     setTapStatus("Expected notes to hit: " + appState.exercise.expectedOnsetsMs.length);
+    resetLiveTimingFeedback();
   }
 
   function showLoopDetail(loopIndex) {
@@ -1480,8 +1976,15 @@
   }
 
   async function runSession(loops) {
+    if (appState.isSessionActive) {
+      return;
+    }
+
     if (!appState.exercise) {
       generateNewExercise();
+    }
+    if (!appState.exercise) {
+      return;
     }
 
     const sessionExercise = {
@@ -1494,10 +1997,41 @@
     };
 
     resetResults();
-    renderNotation(ui.notationContainer, sessionExercise, []);
+    const liveNoteFeedback = renderNotation(ui.notationContainer, sessionExercise, []);
+    const liveHitByLoop = Array.from({ length: loops }, function () {
+      return new Set();
+    });
+    const missTimeouts = [];
+    const clearMissTimeouts = function () {
+      missTimeouts.forEach(function (timeoutId) {
+        clearTimeout(timeoutId);
+      });
+      missTimeouts.length = 0;
+    };
+    const scheduleLoopMissChecks = function (loopNumber) {
+      const loopIndex = loopNumber - 1;
+      const hitSet = liveHitByLoop[loopIndex];
+      if (!hitSet) {
+        return;
+      }
+
+      sessionExercise.expectedOnsetsMs.forEach(function (expectedMs, expectedIndex) {
+        const delayMs = expectedMs + getMissCheckDelayMs(sessionExercise.expectedOnsetsMs, expectedIndex);
+        const timeoutId = setTimeout(function () {
+          if (!appState.isSessionActive || hitSet.has(expectedIndex)) {
+            return;
+          }
+          hitSet.add(expectedIndex);
+          liveNoteFeedback.flashMiss(expectedIndex);
+        }, Math.max(0, delayMs));
+        missTimeouts.push(timeoutId);
+      });
+    };
     setButtonsDisabled(true);
+    appState.isSessionActive = true;
     setStatus("Starting");
     setTapStatus("Preparing audio and count-in...");
+    resetLiveTimingFeedback("Waiting for count-in...");
 
     let totalTapCount = 0;
 
@@ -1524,6 +2058,9 @@
           } else if (state === "complete") {
             setStatus("Scoring");
             setBeatIndicator(false, "Scoring...");
+          } else if (state === "cancelled") {
+            setStatus("Cancelled");
+            setBeatIndicator(false, "Cancelled");
           }
         },
         onBeat: function (payload) {
@@ -1531,6 +2068,9 @@
           setBeatIndicator(true, phaseText + ": beat " + payload.beatInMeasure);
         },
         onLoopStart: function (loopNumber) {
+          liveNoteFeedback.clear();
+          scheduleLoopMissChecks(loopNumber);
+          resetLiveTimingFeedback("Loop " + loopNumber + ": waiting for tap");
           if (loops > 1) {
             setTapStatus("Loop " + loopNumber + "/" + loops + " active. Press Space on each note.");
           } else {
@@ -1538,20 +2078,44 @@
           }
         },
         onTap: function (payload) {
-          totalTapCount += 1;
-          setTapStatus("Loop " + payload.loop + "/" + loops + " active. Total taps: " + totalTapCount);
+          totalTapCount = payload.totalTapCount;
+          const nearest = findNearestExpectedOffset(sessionExercise.expectedOnsetsMs, payload.withinLoopMs);
+          if (nearest.expectedIndex >= 0 && liveHitByLoop[payload.loop - 1]) {
+            liveHitByLoop[payload.loop - 1].add(nearest.expectedIndex);
+          }
+          liveNoteFeedback.flashTap(payload.withinLoopMs, nearest.offsetMs);
+          setLiveTimingFeedback({ offsetMs: nearest.offsetMs });
+          setTapStatus(
+            "Loop " +
+              payload.loop +
+              "/" +
+              loops +
+              " active. Total taps: " +
+              totalTapCount +
+              ". " +
+              timingWordsFromOffset(nearest.offsetMs) +
+              ".",
+          );
         },
         onComplete: function (payload) {
+          clearMissTimeouts();
           appState.loopTapSets = payload.loopTapsMs;
+          appState.isSessionActive = false;
           setButtonsDisabled(false);
           setBeatIndicator(false, "Finished");
+          resetLiveTimingFeedback("Session complete");
 
           if (loops === 1) {
             const result = gradeAttempt(sessionExercise.expectedOnsetsMs, payload.loopTapsMs[0]);
             appState.loopResults = [result];
             renderSummaryCards(ui.summaryCards, result, "Attempt");
             renderNotation(ui.notationContainer, sessionExercise, [
-              { label: "Attempt", offsetsMs: result.tapOffsetsMs },
+              buildNotationAnalysisRow(
+                "Attempt",
+                sessionExercise.expectedOnsetsMs,
+                payload.loopTapsMs[0],
+                result,
+              ),
             ]);
             renderAttemptTable(
               ui.feedbackTableBody,
@@ -1571,10 +2135,12 @@
             ui.notationContainer,
             sessionExercise,
             challenge.loopResults.map(function (loopResult, loopIndex) {
-              return {
-                label: "Loop " + (loopIndex + 1),
-                offsetsMs: loopResult.tapOffsetsMs,
-              };
+              return buildNotationAnalysisRow(
+                "Loop " + (loopIndex + 1),
+                sessionExercise.expectedOnsetsMs,
+                payload.loopTapsMs[loopIndex],
+                loopResult,
+              );
             }),
           );
 
@@ -1594,13 +2160,36 @@
           showLoopDetail(0);
           setStatus("Ready");
         },
+        onCancel: function (payload) {
+          clearMissTimeouts();
+          appState.loopTapSets = payload.loopTapsMs;
+          appState.isSessionActive = false;
+          setButtonsDisabled(false);
+          setBeatIndicator(false, "Cancelled");
+          setStatus("Cancelled");
+          resetLiveTimingFeedback("Session cancelled");
+          const recordedTaps = payload.loopTapsMs.reduce(function (sum, taps) {
+            return sum + taps.length;
+          }, 0);
+          setTapStatus("Cancelled. Recorded " + recordedTaps + " taps.");
+        },
       });
     } catch (error) {
+      clearMissTimeouts();
+      appState.isSessionActive = false;
       setButtonsDisabled(false);
       setStatus("Error");
       setBeatIndicator(false, "Error");
       setTapStatus("Session failed: " + error.message);
+      resetLiveTimingFeedback("Session failed");
     }
+  }
+
+  function cancelSession() {
+    if (!appState.isSessionActive) {
+      return;
+    }
+    timingEngine.cancel("user");
   }
 
   function installKeyboardCapture() {
@@ -1612,10 +2201,28 @@
         event.preventDefault();
       }
 
+      if (event.repeat || appState.isSpaceHeld) {
+        return;
+      }
+      appState.isSpaceHeld = true;
+      if (timingEngine.isTapWindowOpen()) {
+        metronome.tapFeedback();
+      }
+
       const wasRecorded = timingEngine.registerTap();
       if (wasRecorded) {
         event.preventDefault();
       }
+    });
+
+    window.addEventListener("keyup", function (event) {
+      if (event.code === "Space") {
+        appState.isSpaceHeld = false;
+      }
+    });
+
+    window.addEventListener("blur", function () {
+      appState.isSpaceHeld = false;
     });
   }
 
@@ -1623,6 +2230,7 @@
     ui.generateBtn.addEventListener("click", generateNewExercise);
     ui.startBtn.addEventListener("click", () => runSession(1));
     ui.loopBtn.addEventListener("click", () => runSession(4));
+    ui.cancelBtn.addEventListener("click", cancelSession);
     ui.levelSelect.addEventListener("change", generateNewExercise);
     ui.tempoSlider.addEventListener("input", function (event) {
       applyTempoToExercise(event.target.value, "user");
@@ -1640,6 +2248,8 @@
     metronome.setSoundMode(ui.clickSoundSelect.value);
     wireControls();
     installKeyboardCapture();
+    setButtonsDisabled(false);
+    resetLiveTimingFeedback();
     generateNewExercise();
   }
 

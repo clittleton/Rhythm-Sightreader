@@ -27,6 +27,24 @@ export class TimingEngine {
     this.session = null;
   }
 
+  cancel(reason = "user") {
+    if (!this.session || (this.state !== "count-in" && this.state !== "performing")) {
+      return false;
+    }
+
+    const snapshot = this.session.loopTapsMs.map((loopTaps) => [...loopTaps]);
+    const onStateChange = this.session.onStateChange;
+    const onCancel = this.session.onCancel;
+    const phase = this.state;
+
+    this.clearTimers();
+    this.state = "cancelled";
+    onStateChange(this.state);
+    this.stop();
+    onCancel({ loopTapsMs: snapshot, phase, reason });
+    return true;
+  }
+
   schedule(msFromNow, fn) {
     const timeoutId = setTimeout(() => {
       this.timeouts.delete(timeoutId);
@@ -44,6 +62,7 @@ export class TimingEngine {
     onLoopStart = () => {},
     onTap = () => {},
     onComplete = () => {},
+    onCancel = () => {},
   }) {
     this.stop();
     await this.metronome.prime();
@@ -54,8 +73,6 @@ export class TimingEngine {
     const singleLoopMs = exercise.totalDurationMs;
     const performanceMs = singleLoopMs * loops;
     const totalMs = countInMs + performanceMs;
-    const sessionStart = performance.now();
-
     this.session = {
       loopTapsMs: Array.from({ length: loops }, () => []),
       loops,
@@ -63,7 +80,10 @@ export class TimingEngine {
       latencyCompensationMs: Math.max(0, latencyCompensationMs),
       performanceStart: null,
       performanceEnd: null,
+      totalTapCount: 0,
       onTap,
+      onCancel,
+      onStateChange,
     };
 
     this.state = "count-in";
@@ -140,7 +160,14 @@ export class TimingEngine {
     const withinLoopMs = elapsedSincePerfStart - loopIndex * this.session.singleLoopMs;
     const compensatedTapMs = Math.round(withinLoopMs - this.session.latencyCompensationMs);
     this.session.loopTapsMs[loopIndex].push(compensatedTapMs);
-    this.session.onTap({ loop: loopIndex + 1, withinLoopMs: compensatedTapMs });
+    this.session.totalTapCount += 1;
+    this.session.onTap({
+      loop: loopIndex + 1,
+      loopIndex,
+      withinLoopMs: compensatedTapMs,
+      tapIndexInLoop: this.session.loopTapsMs[loopIndex].length,
+      totalTapCount: this.session.totalTapCount,
+    });
     return true;
   }
 }

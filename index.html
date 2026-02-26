@@ -15,7 +15,6 @@
     <script src="https://cdn.jsdelivr.net/npm/tone@15.0.4/build/Tone.js"></script>
   </head>
   <body>
-    <div class="background-glow" aria-hidden="true"></div>
     <main class="app-shell">
       <header class="hero">
         <p class="eyebrow">Percussion Studio</p>
@@ -32,6 +31,7 @@
         <button id="generateBtn" type="button">Generate</button>
         <button id="startBtn" type="button">Start</button>
         <button id="loopBtn" type="button">Loop x4</button>
+        <button id="cancelBtn" type="button" disabled>Cancel</button>
 
         <div class="tempo-controls">
           <label for="tempoSlider">Tempo</label>
@@ -81,6 +81,10 @@
         <div class="panel-heading">
           <h2>Performance Feedback</h2>
           <p id="tapStatus">No taps recorded.</p>
+        </div>
+        <div id="liveTimingFeedback" class="live-timing" aria-live="polite">
+          <span class="live-dot"></span>
+          <strong id="liveTimingText">Waiting for first tap</strong>
         </div>
 
         <div id="summaryCards" class="summary-cards"></div>

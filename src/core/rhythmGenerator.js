@@ -9,7 +9,7 @@ export const DURATION_TICKS = {
 };
 
 const REST_SUFFIX = "r";
-const MAX_GENERATION_ATTEMPTS = 80;
+const MAX_GENERATION_ATTEMPTS = 240;
 
 function randomIntInclusive(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
@@ -187,6 +187,10 @@ function generateMeasure(levelConfig, timeSignature, measureStartTick, measureTi
     applySyncopationWithinMeasure(tokens, measureStartTick, levelConfig.syncopationRate ?? 0.2);
   }
 
+  if (!tokens.some((token) => !token.isRest)) {
+    throw new Error("Generated silent measure.");
+  }
+
   return tokens;
 }
 
@@ -241,6 +245,13 @@ export function validateGeneratedExercise(exercise, levelConfig) {
       };
     }
 
+    if (!notes.some((token) => !token.isRest)) {
+      return {
+        ok: false,
+        reason: `Measure ${m + 1} contains only rests.`,
+      };
+    }
+
     for (let idx = 0; idx < notes.length; idx += 1) {
       const token = notes[idx];
       const code = `${token.durationCode}${token.isRest ? "r" : ""}`;
@@ -265,6 +276,10 @@ export function validateGeneratedExercise(exercise, levelConfig) {
 
   if (exercise.timeSignature.num !== timeSig.num || exercise.timeSignature.den !== timeSig.den) {
     return { ok: false, reason: "Time signature mismatch." };
+  }
+
+  if (!exercise.expectedOnsetsMs.length) {
+    return { ok: false, reason: "Exercise has no playable onsets." };
   }
 
   return { ok: true };
