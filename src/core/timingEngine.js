@@ -78,6 +78,8 @@ export class TimingEngine {
       loops,
       singleLoopMs,
       latencyCompensationMs: Math.max(0, latencyCompensationMs),
+      firstExpectedOnsetMs: Math.max(0, exercise.expectedOnsetsMs?.[0] ?? 0),
+      loopBoundaryShiftWindowMs: 0,
       performanceStart: null,
       performanceEnd: null,
       totalTapCount: 0,
@@ -85,6 +87,10 @@ export class TimingEngine {
       onCancel,
       onStateChange,
     };
+    this.session.loopBoundaryShiftWindowMs = Math.max(
+      140,
+      Math.min(260, this.session.firstExpectedOnsetMs + 110),
+    );
 
     this.state = "count-in";
     onStateChange(this.state);
@@ -153,12 +159,20 @@ export class TimingEngine {
     }
 
     const elapsedSincePerfStart = now - this.session.performanceStart;
-    const loopIndex = Math.min(
+    let loopIndex = Math.min(
       this.session.loops - 1,
       Math.floor(elapsedSincePerfStart / this.session.singleLoopMs),
     );
     const withinLoopMs = elapsedSincePerfStart - loopIndex * this.session.singleLoopMs;
-    const compensatedTapMs = Math.round(withinLoopMs - this.session.latencyCompensationMs);
+    let compensatedTapMs = Math.round(withinLoopMs - this.session.latencyCompensationMs);
+
+    if (
+      loopIndex < this.session.loops - 1 &&
+      compensatedTapMs >= this.session.singleLoopMs - this.session.loopBoundaryShiftWindowMs
+    ) {
+      loopIndex += 1;
+      compensatedTapMs -= this.session.singleLoopMs;
+    }
     this.session.loopTapsMs[loopIndex].push(compensatedTapMs);
     this.session.totalTapCount += 1;
     this.session.onTap({

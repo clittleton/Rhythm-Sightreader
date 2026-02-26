@@ -264,6 +264,16 @@ button:disabled {
   pointer-events: none;
 }
 
+.moving-playhead-layer {
+  pointer-events: none;
+}
+
+.moving-playhead-line {
+  stroke: rgba(31, 111, 159, 0.9);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
 .note-hit-impact,
 .note-hit-core {
   pointer-events: none;
