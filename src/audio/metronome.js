@@ -39,7 +39,7 @@ export class Metronome {
       if (!AudioContextRef) {
         return;
       }
-      this.audioContext = new AudioContextRef();
+      this.audioContext = new AudioContextRef({ latencyHint: "interactive" });
     }
 
     if (this.audioContext.state === "suspended") {
@@ -71,36 +71,73 @@ export class Metronome {
     return 0;
   }
 
-  tick(accent = false) {
-    if (this.isToneReady && this.toneSynth) {
-      const note =
-        this.soundMode === "tick" ? (accent ? "G6" : "D6") : accent ? "F6" : "C6";
-      const immediateTime =
-        typeof window.Tone?.immediate === "function"
-          ? window.Tone.immediate()
-          : undefined;
-      this.toneSynth.triggerAttackRelease(note, 0.02, immediateTime);
-      return;
+  getTapAudioContext() {
+    const toneRaw = window.Tone?.getContext?.()?.rawContext;
+    if (toneRaw) {
+      return toneRaw;
+    }
+    return this.audioContext;
+  }
+
+  triggerToneToneJs(note, durationSeconds = 0.02) {
+    if (!this.isToneReady || !this.toneSynth) {
+      return false;
     }
 
-    if (!this.audioContext) {
-      return;
+    const immediateTime =
+      typeof window.Tone?.immediate === "function"
+        ? window.Tone.immediate()
+        : undefined;
+    this.toneSynth.triggerAttackRelease(note, durationSeconds, immediateTime);
+    return true;
+  }
+
+  triggerToneWebAudio({ frequency, accent = false, durationSeconds = 0.018, context = this.audioContext }) {
+    if (!context) {
+      return false;
     }
 
-    const now = this.audioContext.currentTime;
-    const osc = this.audioContext.createOscillator();
-    const gain = this.audioContext.createGain();
+    const now = context.currentTime;
+    const osc = context.createOscillator();
+    const gain = context.createGain();
 
     osc.type = this.soundMode === "tick" ? "sine" : "square";
-    osc.frequency.value =
-      this.soundMode === "tick" ? (accent ? 1960 : 1480) : accent ? 1760 : 1320;
+    osc.frequency.value = frequency;
     gain.gain.setValueAtTime(0.0001, now);
     gain.gain.exponentialRampToValueAtTime(accent ? 0.18 : 0.12, now + 0.0015);
-    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.015);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + durationSeconds);
 
     osc.connect(gain);
-    gain.connect(this.audioContext.destination);
+    gain.connect(context.destination);
     osc.start(now);
-    osc.stop(now + 0.018);
+    osc.stop(now + durationSeconds + 0.003);
+    return true;
+  }
+
+  tapFeedback() {
+    const context = this.getTapAudioContext();
+    const freq = this.soundMode === "tick" ? 1480 : 1760;
+    this.triggerToneWebAudio({
+      frequency: freq,
+      accent: false,
+      durationSeconds: 0.01,
+      context,
+    });
+  }
+
+  tick(accent = false) {
+    const note =
+      this.soundMode === "tick" ? (accent ? "G6" : "D6") : accent ? "F6" : "C6";
+    if (this.triggerToneToneJs(note, 0.02)) {
+      return;
+    }
+
+    const freq =
+      this.soundMode === "tick" ? (accent ? 1960 : 1480) : accent ? 1760 : 1320;
+    this.triggerToneWebAudio({
+      frequency: freq,
+      accent,
+      durationSeconds: 0.015,
+    });
   }
 }

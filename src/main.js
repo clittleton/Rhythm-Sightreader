@@ -11,6 +11,7 @@ const ui = {
   generateBtn: document.getElementById("generateBtn"),
   startBtn: document.getElementById("startBtn"),
   loopBtn: document.getElementById("loopBtn"),
+  cancelBtn: document.getElementById("cancelBtn"),
   tempoSlider: document.getElementById("tempoSlider"),
   tempoInput: document.getElementById("tempoInput"),
   clickSoundSelect: document.getElementById("clickSoundSelect"),
@@ -25,6 +26,8 @@ const ui = {
   loopBreakdown: document.getElementById("loopBreakdown"),
   feedbackTableBody: document.getElementById("feedbackTableBody"),
   timelineStrip: document.getElementById("timelineStrip"),
+  liveTimingFeedback: document.getElementById("liveTimingFeedback"),
+  liveTimingText: document.getElementById("liveTimingText"),
 };
 
 const metronome = new Metronome();
@@ -35,6 +38,8 @@ const appState = {
   loopTapSets: [],
   loopResults: [],
   selectedTempoBpm: null,
+  isSessionActive: false,
+  isSpaceHeld: false,
 };
 
 function clampTempo(value) {
@@ -61,11 +66,131 @@ function setButtonsDisabled(disabled) {
   ui.startBtn.disabled = disabled;
   ui.loopBtn.disabled = disabled;
   ui.levelSelect.disabled = disabled;
+  ui.cancelBtn.disabled = !disabled;
 }
 
 function setBeatIndicator(active, label) {
   ui.beatIndicator.classList.toggle("active", active);
   ui.beatText.textContent = label;
+}
+
+function timingClassFromOffset(offsetMs) {
+  const abs = Math.abs(offsetMs);
+  if (abs <= 50) {
+    return "timing-good";
+  }
+  if (abs <= 100) {
+    return "timing-warn";
+  }
+  return "timing-bad";
+}
+
+function timingWordsFromOffset(offsetMs) {
+  const rounded = Math.round(offsetMs);
+  if (rounded < 0) {
+    return `Early ${Math.abs(rounded)} ms`;
+  }
+  if (rounded > 0) {
+    return `Late ${rounded} ms`;
+  }
+  return "On time";
+}
+
+function resetLiveTimingFeedback(message = "Waiting for first tap") {
+  if (!ui.liveTimingFeedback || !ui.liveTimingText) {
+    return;
+  }
+  ui.liveTimingFeedback.classList.remove("timing-good", "timing-warn", "timing-bad", "timing-extra");
+  ui.liveTimingText.textContent = message;
+}
+
+function setLiveTimingFeedback({ offsetMs, isExtra = false }) {
+  if (!ui.liveTimingFeedback || !ui.liveTimingText) {
+    return;
+  }
+  ui.liveTimingFeedback.classList.remove("timing-good", "timing-warn", "timing-bad", "timing-extra");
+  ui.liveTimingFeedback.classList.add(timingClassFromOffset(offsetMs));
+  if (isExtra) {
+    ui.liveTimingFeedback.classList.add("timing-extra");
+  }
+  const timingText = timingWordsFromOffset(offsetMs);
+  ui.liveTimingText.textContent = isExtra ? `Extra tap: ${timingText}` : timingText;
+}
+
+function findNearestExpectedOffset(expectedOnsetsMs, tapMs) {
+  if (!expectedOnsetsMs.length) {
+    return { expectedIndex: -1, offsetMs: 0 };
+  }
+
+  let low = 0;
+  let high = expectedOnsetsMs.length - 1;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    if (expectedOnsetsMs[mid] < tapMs) {
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+
+  const leftIndex = Math.max(0, low - 1);
+  const rightIndex = Math.min(expectedOnsetsMs.length - 1, low);
+  const leftGap = Math.abs(tapMs - expectedOnsetsMs[leftIndex]);
+  const rightGap = Math.abs(tapMs - expectedOnsetsMs[rightIndex]);
+  const expectedIndex = rightGap < leftGap ? rightIndex : leftIndex;
+  return {
+    expectedIndex,
+    offsetMs: Math.round(tapMs - expectedOnsetsMs[expectedIndex]),
+  };
+}
+
+function getMissCheckDelayMs(expectedOnsetsMs, expectedIndex) {
+  const expectedMs = expectedOnsetsMs[expectedIndex];
+  const nextMs = expectedOnsetsMs[expectedIndex + 1];
+  if (typeof nextMs === "number") {
+    const gapMs = Math.max(1, nextMs - expectedMs);
+    return Math.max(120, Math.min(320, Math.round(gapMs * 0.72)));
+  }
+  return 240;
+}
+
+function buildNotationAnalysisRow(label, expectedOnsetsMs, tapsMs, result) {
+  const expectedByTapIndex = new Map();
+  result.matchedTapIndices.forEach((tapIndex, expectedIndex) => {
+    if (tapIndex >= 0) {
+      expectedByTapIndex.set(tapIndex, expectedIndex);
+    }
+  });
+
+  const tapEvents = tapsMs.map((tapMs, tapIndex) => {
+    const expectedIndex = expectedByTapIndex.get(tapIndex);
+    if (expectedIndex !== undefined) {
+      return {
+        tapMs,
+        offsetMs: Math.round(tapMs - expectedOnsetsMs[expectedIndex]),
+        isExtra: false,
+      };
+    }
+    const nearest = findNearestExpectedOffset(expectedOnsetsMs, tapMs);
+    return {
+      tapMs,
+      offsetMs: nearest.offsetMs,
+      isExtra: true,
+    };
+  });
+
+  const missedExpectedIndices = result.matchedTapIndices.reduce((indices, tapIndex, expectedIndex) => {
+    if (tapIndex === -1) {
+      indices.push(expectedIndex);
+    }
+    return indices;
+  }, []);
+
+  return {
+    label,
+    tapEvents,
+    missedExpectedIndices,
+  };
 }
 
 function populateLevelSelector() {
@@ -126,8 +251,24 @@ function applyTempoToExercise(tempoBpm, source) {
 }
 
 function generateNewExercise() {
+  if (appState.isSessionActive) {
+    return;
+  }
+
   const levelConfig = currentLevelConfig();
-  appState.exercise = generateExercise(levelConfig);
+  try {
+    appState.exercise = generateExercise(levelConfig);
+  } catch (error) {
+    appState.exercise = null;
+    resetResults();
+    renderNotation(ui.notationContainer, null, []);
+    setStatus("Error");
+    setBeatIndicator(false, "Error");
+    setTapStatus(`Generation failed: ${error.message}`);
+    resetLiveTimingFeedback("No exercise loaded");
+    return;
+  }
+
   if (appState.selectedTempoBpm !== null) {
     applyTempoToExercise(appState.selectedTempoBpm, "system");
   } else {
@@ -138,6 +279,7 @@ function generateNewExercise() {
   setStatus("Ready");
   setBeatIndicator(false, "Ready");
   setTapStatus(`Expected notes to hit: ${appState.exercise.expectedOnsetsMs.length}`);
+  resetLiveTimingFeedback();
 }
 
 function showLoopDetail(loopIndex) {
@@ -166,8 +308,15 @@ function addLoopButtons(loopCount) {
 }
 
 async function runSession(loops) {
+  if (appState.isSessionActive) {
+    return;
+  }
+
   if (!appState.exercise) {
     generateNewExercise();
+  }
+  if (!appState.exercise) {
+    return;
   }
 
   const sessionExercise = {
@@ -178,10 +327,38 @@ async function runSession(loops) {
   };
 
   resetResults();
-  renderNotation(ui.notationContainer, sessionExercise, []);
+  const liveNoteFeedback = renderNotation(ui.notationContainer, sessionExercise, []);
+  const liveHitByLoop = Array.from({ length: loops }, () => new Set());
+  const missTimeouts = [];
+  const clearMissTimeouts = () => {
+    missTimeouts.forEach((timeoutId) => clearTimeout(timeoutId));
+    missTimeouts.length = 0;
+  };
+  const scheduleLoopMissChecks = (loopNumber) => {
+    const loopIndex = loopNumber - 1;
+    const hitSet = liveHitByLoop[loopIndex];
+    if (!hitSet) {
+      return;
+    }
+
+    sessionExercise.expectedOnsetsMs.forEach((expectedMs, expectedIndex) => {
+      const delayMs = expectedMs + getMissCheckDelayMs(sessionExercise.expectedOnsetsMs, expectedIndex);
+      const timeoutId = setTimeout(() => {
+        if (!appState.isSessionActive || hitSet.has(expectedIndex)) {
+          return;
+        }
+        hitSet.add(expectedIndex);
+        liveNoteFeedback.flashMiss(expectedIndex);
+      }, Math.max(0, delayMs));
+      missTimeouts.push(timeoutId);
+    });
+  };
+
   setButtonsDisabled(true);
+  appState.isSessionActive = true;
   setStatus("Starting");
   setTapStatus("Preparing audio and count-in...");
+  resetLiveTimingFeedback("Waiting for count-in...");
 
   let totalTapCount = 0;
 
@@ -206,6 +383,9 @@ async function runSession(loops) {
         } else if (state === "complete") {
           setStatus("Scoring");
           setBeatIndicator(false, "Scoring...");
+        } else if (state === "cancelled") {
+          setStatus("Cancelled");
+          setBeatIndicator(false, "Cancelled");
         }
       },
       onBeat: ({ phase, beatInMeasure }) => {
@@ -213,27 +393,41 @@ async function runSession(loops) {
         setBeatIndicator(true, `${phaseText}: beat ${beatInMeasure}`);
       },
       onLoopStart: (loopNumber) => {
+        liveNoteFeedback.clear();
+        scheduleLoopMissChecks(loopNumber);
+        resetLiveTimingFeedback(`Loop ${loopNumber}: waiting for tap`);
         if (loops > 1) {
           setTapStatus(`Loop ${loopNumber}/${loops} active. Press Space on each note.`);
         } else {
           setTapStatus("Attempt active. Press Space on each note.");
         }
       },
-      onTap: ({ loop }) => {
-        totalTapCount += 1;
-        setTapStatus(`Loop ${loop}/${loops} active. Total taps: ${totalTapCount}`);
+      onTap: ({ loop, withinLoopMs, totalTapCount: sessionTapCount }) => {
+        totalTapCount = sessionTapCount;
+        const nearest = findNearestExpectedOffset(sessionExercise.expectedOnsetsMs, withinLoopMs);
+        if (nearest.expectedIndex >= 0 && liveHitByLoop[loop - 1]) {
+          liveHitByLoop[loop - 1].add(nearest.expectedIndex);
+        }
+        liveNoteFeedback.flashTap(withinLoopMs, nearest.offsetMs);
+        setLiveTimingFeedback({ offsetMs: nearest.offsetMs });
+        setTapStatus(
+          `Loop ${loop}/${loops} active. Total taps: ${totalTapCount}. ${timingWordsFromOffset(nearest.offsetMs)}.`,
+        );
       },
       onComplete: ({ loopTapsMs }) => {
+        clearMissTimeouts();
         appState.loopTapSets = loopTapsMs;
+        appState.isSessionActive = false;
         setButtonsDisabled(false);
         setBeatIndicator(false, "Finished");
+        resetLiveTimingFeedback("Session complete");
 
         if (loops === 1) {
           const result = gradeAttempt(sessionExercise.expectedOnsetsMs, loopTapsMs[0]);
           appState.loopResults = [result];
           renderSummaryCards(ui.summaryCards, result, "Attempt");
           renderNotation(ui.notationContainer, sessionExercise, [
-            { label: "Attempt", offsetsMs: result.tapOffsetsMs },
+            buildNotationAnalysisRow("Attempt", sessionExercise.expectedOnsetsMs, loopTapsMs[0], result),
           ]);
           renderAttemptTable(ui.feedbackTableBody, sessionExercise.expectedOnsetsMs, loopTapsMs[0], result);
           ui.timelineStrip.innerHTML = "";
@@ -247,10 +441,14 @@ async function runSession(loops) {
         renderNotation(
           ui.notationContainer,
           sessionExercise,
-          challenge.loopResults.map((loopResult, loopIndex) => ({
-            label: `Loop ${loopIndex + 1}`,
-            offsetsMs: loopResult.tapOffsetsMs,
-          })),
+          challenge.loopResults.map((loopResult, loopIndex) =>
+            buildNotationAnalysisRow(
+              `Loop ${loopIndex + 1}`,
+              sessionExercise.expectedOnsetsMs,
+              loopTapsMs[loopIndex],
+              loopResult,
+            ),
+          ),
         );
 
         renderSummaryCards(
@@ -269,13 +467,34 @@ async function runSession(loops) {
         showLoopDetail(0);
         setStatus("Ready");
       },
+      onCancel: ({ loopTapsMs }) => {
+        clearMissTimeouts();
+        appState.loopTapSets = loopTapsMs;
+        appState.isSessionActive = false;
+        setButtonsDisabled(false);
+        setBeatIndicator(false, "Cancelled");
+        setStatus("Cancelled");
+        resetLiveTimingFeedback("Session cancelled");
+        const recordedTaps = loopTapsMs.reduce((sum, taps) => sum + taps.length, 0);
+        setTapStatus(`Cancelled. Recorded ${recordedTaps} taps.`);
+      },
     });
   } catch (error) {
+    clearMissTimeouts();
+    appState.isSessionActive = false;
     setButtonsDisabled(false);
     setStatus("Error");
     setBeatIndicator(false, "Error");
     setTapStatus(`Session failed: ${error.message}`);
+    resetLiveTimingFeedback("Session failed");
   }
+}
+
+function cancelSession() {
+  if (!appState.isSessionActive) {
+    return;
+  }
+  timingEngine.cancel("user");
 }
 
 function installKeyboardCapture() {
@@ -288,10 +507,28 @@ function installKeyboardCapture() {
       event.preventDefault();
     }
 
+    if (event.repeat || appState.isSpaceHeld) {
+      return;
+    }
+    appState.isSpaceHeld = true;
+    if (timingEngine.isTapWindowOpen()) {
+      metronome.tapFeedback();
+    }
+
     const wasRecorded = timingEngine.registerTap();
     if (wasRecorded) {
       event.preventDefault();
     }
+  });
+
+  window.addEventListener("keyup", (event) => {
+    if (event.code === "Space") {
+      appState.isSpaceHeld = false;
+    }
+  });
+
+  window.addEventListener("blur", () => {
+    appState.isSpaceHeld = false;
   });
 }
 
@@ -299,6 +536,7 @@ function wireControls() {
   ui.generateBtn.addEventListener("click", generateNewExercise);
   ui.startBtn.addEventListener("click", () => runSession(1));
   ui.loopBtn.addEventListener("click", () => runSession(4));
+  ui.cancelBtn.addEventListener("click", cancelSession);
   ui.levelSelect.addEventListener("change", generateNewExercise);
   ui.tempoSlider.addEventListener("input", (event) => applyTempoToExercise(event.target.value, "user"));
   ui.tempoInput.addEventListener("input", (event) => applyTempoToExercise(event.target.value, "user"));
@@ -310,6 +548,8 @@ function init() {
   metronome.setSoundMode(ui.clickSoundSelect.value);
   wireControls();
   installKeyboardCapture();
+  setButtonsDisabled(false);
+  resetLiveTimingFeedback();
   generateNewExercise();
 }
 

@@ -16,6 +16,11 @@ function validateGeneration() {
       const exercise = generateExercise(levelConfig);
       const result = validateGeneratedExercise(exercise, levelConfig);
       assert.equal(result.ok, true, `Level ${levelConfig.id} invalid: ${result.reason}`);
+      assert.equal(
+        exercise.expectedOnsetsMs.length > 0,
+        true,
+        `Level ${levelConfig.id} generated an exercise without playable onsets`,
+      );
 
       const allowed = new Set(levelConfig.allowedDurations);
       exercise.notes.forEach((token) => {
@@ -32,10 +37,17 @@ function validateGeneration() {
       for (let measure = 0; measure < exercise.measuresPerExercise; measure += 1) {
         const start = measure * meterTicks;
         const end = start + meterTicks;
-        const ticks = exercise.notes
-          .filter((token) => token.beatStartTicks >= start && token.beatStartTicks < end)
+        const notesInMeasure = exercise.notes.filter(
+          (token) => token.beatStartTicks >= start && token.beatStartTicks < end,
+        );
+        const ticks = notesInMeasure
           .reduce((sum, token) => sum + DURATION_TICKS[token.durationCode], 0);
         assert.equal(ticks, meterTicks, `Level ${levelConfig.id} measure ${measure + 1} tick mismatch`);
+        assert.equal(
+          notesInMeasure.some((token) => !token.isRest),
+          true,
+          `Level ${levelConfig.id} measure ${measure + 1} generated only rests`,
+        );
       }
     }
   }
