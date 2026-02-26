@@ -394,6 +394,7 @@ async function runSession(loops) {
       },
       onLoopStart: (loopNumber) => {
         liveNoteFeedback.clear();
+        liveNoteFeedback.startPlayhead(sessionExercise.totalDurationMs);
         scheduleLoopMissChecks(loopNumber);
         resetLiveTimingFeedback(`Loop ${loopNumber}: waiting for tap`);
         if (loops > 1) {
@@ -415,6 +416,7 @@ async function runSession(loops) {
         );
       },
       onComplete: ({ loopTapsMs }) => {
+        liveNoteFeedback.stopPlayhead();
         clearMissTimeouts();
         appState.loopTapSets = loopTapsMs;
         appState.isSessionActive = false;
@@ -468,6 +470,7 @@ async function runSession(loops) {
         setStatus("Ready");
       },
       onCancel: ({ loopTapsMs }) => {
+        liveNoteFeedback.stopPlayhead();
         clearMissTimeouts();
         appState.loopTapSets = loopTapsMs;
         appState.isSessionActive = false;
@@ -480,6 +483,7 @@ async function runSession(loops) {
       },
     });
   } catch (error) {
+    liveNoteFeedback.stopPlayhead();
     clearMissTimeouts();
     appState.isSessionActive = false;
     setButtonsDisabled(false);

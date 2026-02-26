@@ -677,6 +677,8 @@
   const NOOP_LIVE_FEEDBACK = {
     flashTap: function () {},
     flashMiss: function () {},
+    startPlayhead: function () {},
+    stopPlayhead: function () {},
     clear: function () {},
   };
 
@@ -933,7 +935,129 @@
     return animate;
   }
 
-  function createLiveNoteFeedbackLayer(container, onsetAnchors, expectedOnsetsMs) {
+  function createMovingPlayheadController(
+    container,
+    onsetAnchors,
+    expectedOnsetsMs,
+    loopDurationMs,
+    timelineBounds,
+  ) {
+    if (
+      !Array.isArray(onsetAnchors) ||
+      !onsetAnchors.length ||
+      !Array.isArray(expectedOnsetsMs) ||
+      !expectedOnsetsMs.length
+    ) {
+      return {
+        startPlayhead: function () {},
+        stopPlayhead: function () {},
+      };
+    }
+
+    const svg = container.querySelector("svg");
+    if (!svg) {
+      return {
+        startPlayhead: function () {},
+        stopPlayhead: function () {},
+      };
+    }
+
+    const svgNs = "http://www.w3.org/2000/svg";
+    const layer = document.createElementNS(svgNs, "g");
+    layer.setAttribute("class", "moving-playhead-layer");
+
+    const line = document.createElementNS(svgNs, "line");
+    line.setAttribute("class", "moving-playhead-line");
+    const minY = Math.min(...onsetAnchors.map(function (anchor) {
+      return anchor.y;
+    }));
+    const maxY = Math.max(...onsetAnchors.map(function (anchor) {
+      return anchor.y;
+    }));
+    line.setAttribute("y1", String(Math.max(14, minY - 36)));
+    line.setAttribute("y2", String(maxY + 18));
+    line.setAttribute("opacity", "0");
+
+    layer.append(line);
+    svg.append(layer);
+
+    const width = Number(svg.getAttribute("width")) || svg.clientWidth || 760;
+    const minBoundX = 18;
+    const maxBoundX = Math.max(minBoundX + 1, width - 18);
+
+    let rafId = null;
+    let running = false;
+    let startedAtMs = 0;
+    let activeLoopMs = Math.max(
+      1,
+      loopDurationMs || expectedOnsetsMs[expectedOnsetsMs.length - 1] || 1,
+    );
+
+    const placeLineAtMs = function (elapsedMs) {
+      const clampedMs = Math.max(0, Math.min(activeLoopMs, elapsedMs));
+      const mappedX = mapTapMsToAnchorX(
+        clampedMs,
+        expectedOnsetsMs,
+        onsetAnchors,
+        activeLoopMs,
+        timelineBounds,
+      );
+      if (mappedX === null) {
+        return;
+      }
+      const x = Math.max(
+        minBoundX,
+        Math.min(maxBoundX, mappedX + LIVE_FEEDBACK_X_OFFSET_PX),
+      );
+      line.setAttribute("x1", String(x));
+      line.setAttribute("x2", String(x));
+    };
+
+    const stopPlayhead = function () {
+      running = false;
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+      line.setAttribute("opacity", "0");
+    };
+
+    const tick = function (nowMs) {
+      if (!running) {
+        return;
+      }
+      const elapsedMs = nowMs - startedAtMs;
+      placeLineAtMs(elapsedMs);
+      if (elapsedMs >= activeLoopMs) {
+        stopPlayhead();
+        return;
+      }
+      rafId = requestAnimationFrame(tick);
+    };
+
+    const startPlayhead = function (loopMs) {
+      stopPlayhead();
+      activeLoopMs = Math.max(1, loopMs || activeLoopMs);
+      startedAtMs = performance.now();
+      placeLineAtMs(0);
+      line.setAttribute("opacity", "0.95");
+      running = true;
+      rafId = requestAnimationFrame(tick);
+    };
+
+    return {
+      startPlayhead: startPlayhead,
+      stopPlayhead: stopPlayhead,
+    };
+  }
+
+  function createLiveNoteFeedbackLayer(
+    container,
+    onsetAnchors,
+    expectedOnsetsMs,
+    totalDurationMs,
+    timelineBounds,
+  ) {
     if (
       !Array.isArray(onsetAnchors) ||
       !onsetAnchors.length ||
@@ -957,7 +1081,13 @@
     const maxBoundX = Math.max(minBoundX + 1, width - 18);
 
     const flashTap = function (tapMs, offsetMs) {
-      const mappedX = mapTapMsToAnchorX(tapMs, expectedOnsetsMs, onsetAnchors);
+      const mappedX = mapTapMsToAnchorX(
+        tapMs,
+        expectedOnsetsMs,
+        onsetAnchors,
+        totalDurationMs,
+        timelineBounds,
+      );
       if (mappedX === null) {
         return;
       }
@@ -1067,60 +1197,109 @@
       }, 280);
     };
 
+    const playhead = createMovingPlayheadController(
+      container,
+      onsetAnchors,
+      expectedOnsetsMs,
+      totalDurationMs,
+      timelineBounds,
+    );
+
     return {
       flashTap: flashTap,
       flashMiss: flashMiss,
+      startPlayhead: playhead.startPlayhead,
+      stopPlayhead: playhead.stopPlayhead,
       clear: function () {
         layer.innerHTML = "";
       },
     };
   }
 
-  function mapTapMsToAnchorX(tapMs, expectedOnsetsMs, onsetAnchors) {
+  function mapTapMsToAnchorX(
+    tapMs,
+    expectedOnsetsMs,
+    onsetAnchors,
+    totalDurationMs,
+    timelineBounds,
+  ) {
     const count = Math.min(expectedOnsetsMs.length, onsetAnchors.length);
     if (count === 0) {
       return null;
     }
-    if (count === 1) {
-      return onsetAnchors[0].x;
+
+    const times = [];
+    const positions = [];
+    const canUseBounds =
+      timelineBounds &&
+      Number.isFinite(timelineBounds.startX) &&
+      Number.isFinite(timelineBounds.endX);
+    const firstExpectedMs = expectedOnsetsMs[0];
+    const earlyVisualWindowMs = Math.max(140, Math.min(260, firstExpectedMs + 120));
+    const earlyAnchorX = canUseBounds ? timelineBounds.startX : onsetAnchors[0].x - 34;
+
+    times.push(firstExpectedMs - earlyVisualWindowMs);
+    positions.push(earlyAnchorX);
+
+    if (canUseBounds && firstExpectedMs > 0) {
+      times.push(0);
+      positions.push(timelineBounds.startX);
     }
 
-    let leftIndex = 0;
-    let rightIndex = 1;
-    if (tapMs <= expectedOnsetsMs[0]) {
-      leftIndex = 0;
-      rightIndex = 1;
-    } else if (tapMs >= expectedOnsetsMs[count - 1]) {
-      leftIndex = count - 2;
-      rightIndex = count - 1;
-    } else {
-      let low = 0;
-      let high = count - 1;
-      while (low <= high) {
-        const mid = Math.floor((low + high) / 2);
-        if (expectedOnsetsMs[mid] < tapMs) {
-          low = mid + 1;
-        } else {
-          high = mid - 1;
-        }
+    for (let idx = 0; idx < count; idx += 1) {
+      times.push(expectedOnsetsMs[idx]);
+      positions.push(onsetAnchors[idx].x);
+    }
+
+    if (
+      canUseBounds &&
+      Number.isFinite(totalDurationMs) &&
+      totalDurationMs > expectedOnsetsMs[count - 1]
+    ) {
+      times.push(totalDurationMs);
+      positions.push(timelineBounds.endX);
+    }
+
+    if (times.length === 1) {
+      return positions[0];
+    }
+    if (tapMs <= times[0]) {
+      return positions[0];
+    }
+    if (tapMs >= times[times.length - 1]) {
+      return positions[positions.length - 1];
+    }
+
+    let low = 0;
+    let high = times.length - 1;
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      if (times[mid] < tapMs) {
+        low = mid + 1;
+      } else {
+        high = mid - 1;
       }
-      rightIndex = Math.max(1, low);
-      leftIndex = rightIndex - 1;
     }
 
-    const startMs = expectedOnsetsMs[leftIndex];
-    const endMs = expectedOnsetsMs[rightIndex];
-    const startX = onsetAnchors[leftIndex].x;
-    const endX = onsetAnchors[rightIndex].x;
+    const rightIndex = Math.max(1, low);
+    const leftIndex = rightIndex - 1;
+    const startMs = times[leftIndex];
+    const endMs = times[rightIndex];
+    const startX = positions[leftIndex];
+    const endX = positions[rightIndex];
     const spanMs = Math.max(1, endMs - startMs);
     const ratio = (tapMs - startMs) / spanMs;
-    const interpolated = startX + (endX - startX) * ratio;
-    const minX = Math.min(startX, endX) - 34;
-    const maxX = Math.max(startX, endX) + 34;
-    return Math.max(minX, Math.min(maxX, interpolated));
+    return startX + (endX - startX) * ratio;
   }
 
-  function drawNotationAnalysisRows(container, onsetAnchors, expectedOnsetsMs, analysisRows) {
+  function drawNotationAnalysisRows(
+    container,
+    onsetAnchors,
+    expectedOnsetsMs,
+    totalDurationMs,
+    timelineBounds,
+    analysisRows,
+  ) {
     if (
       !Array.isArray(analysisRows) ||
       !analysisRows.length ||
@@ -1162,7 +1341,13 @@
 
       const tapEvents = Array.isArray(row.tapEvents) ? row.tapEvents : [];
       tapEvents.forEach(function (tapEvent) {
-        const mappedX = mapTapMsToAnchorX(tapEvent.tapMs, expectedOnsetsMs, onsetAnchors);
+        const mappedX = mapTapMsToAnchorX(
+          tapEvent.tapMs,
+          expectedOnsetsMs,
+          onsetAnchors,
+          totalDurationMs,
+          timelineBounds,
+        );
         if (mappedX === null) {
           return;
         }
@@ -1237,6 +1422,8 @@
       (innerWidth - measureGap * (exercise.measuresPerExercise - 1)) / exercise.measuresPerExercise;
     const tiesToDraw = [];
     const onsetAnchors = [];
+    let firstStaveLeftX = null;
+    let lastStaveRightX = null;
 
     groupedMeasures.forEach(function (measureTokens, measureIndex) {
       const measureStartTick = measureIndex * exercise.measureTicks;
@@ -1254,6 +1441,10 @@
 
       const staveX = leftPadding + measureIndex * (measureWidth + measureGap);
       const stave = new VF.Stave(staveX, 34, measureWidth);
+      if (firstStaveLeftX === null) {
+        firstStaveLeftX = staveX;
+      }
+      lastStaveRightX = staveX + measureWidth;
 
       if (measureIndex === 0) {
         stave.addTimeSignature(exercise.timeSignature.num + "/" + exercise.timeSignature.den);
@@ -1337,12 +1528,28 @@
     tiesToDraw.forEach(function (tie) {
       tie.setContext(context).draw();
     });
+    const timelineBounds =
+      firstStaveLeftX === null || lastStaveRightX === null
+        ? null
+        : {
+            startX: firstStaveLeftX + 8,
+            endX: lastStaveRightX - 8,
+          };
     const liveNoteFeedback = createLiveNoteFeedbackLayer(
       container,
       onsetAnchors,
       exercise.expectedOnsetsMs,
+      exercise.totalDurationMs,
+      timelineBounds,
     );
-    drawNotationAnalysisRows(container, onsetAnchors, exercise.expectedOnsetsMs, analysisRows || []);
+    drawNotationAnalysisRows(
+      container,
+      onsetAnchors,
+      exercise.expectedOnsetsMs,
+      exercise.totalDurationMs,
+      timelineBounds,
+      analysisRows || [],
+    );
     return liveNoteFeedback;
   }
 
@@ -1580,6 +1787,8 @@
       loops: loops,
       singleLoopMs: singleLoopMs,
       latencyCompensationMs: latencyCompensationMs,
+      firstExpectedOnsetMs: Math.max(0, (exercise.expectedOnsetsMs && exercise.expectedOnsetsMs[0]) || 0),
+      loopBoundaryShiftWindowMs: 0,
       performanceStart: null,
       performanceEnd: null,
       totalTapCount: 0,
@@ -1587,6 +1796,10 @@
       onCancel: onCancel,
       onStateChange: onStateChange,
     };
+    this.session.loopBoundaryShiftWindowMs = Math.max(
+      140,
+      Math.min(260, this.session.firstExpectedOnsetMs + 110),
+    );
 
     this.state = "count-in";
     onStateChange(this.state);
@@ -1655,12 +1868,20 @@
     }
 
     const elapsedSincePerfStart = tapTime - this.session.performanceStart;
-    const loopIndex = Math.min(
+    let loopIndex = Math.min(
       this.session.loops - 1,
       Math.floor(elapsedSincePerfStart / this.session.singleLoopMs),
     );
     const withinLoopMs = elapsedSincePerfStart - loopIndex * this.session.singleLoopMs;
-    const compensatedTapMs = Math.round(withinLoopMs - this.session.latencyCompensationMs);
+    let compensatedTapMs = Math.round(withinLoopMs - this.session.latencyCompensationMs);
+
+    if (
+      loopIndex < this.session.loops - 1 &&
+      compensatedTapMs >= this.session.singleLoopMs - this.session.loopBoundaryShiftWindowMs
+    ) {
+      loopIndex += 1;
+      compensatedTapMs -= this.session.singleLoopMs;
+    }
     this.session.loopTapsMs[loopIndex].push(compensatedTapMs);
     this.session.totalTapCount += 1;
     this.session.onTap({
@@ -2069,6 +2290,7 @@
         },
         onLoopStart: function (loopNumber) {
           liveNoteFeedback.clear();
+          liveNoteFeedback.startPlayhead(sessionExercise.totalDurationMs);
           scheduleLoopMissChecks(loopNumber);
           resetLiveTimingFeedback("Loop " + loopNumber + ": waiting for tap");
           if (loops > 1) {
@@ -2098,6 +2320,7 @@
           );
         },
         onComplete: function (payload) {
+          liveNoteFeedback.stopPlayhead();
           clearMissTimeouts();
           appState.loopTapSets = payload.loopTapsMs;
           appState.isSessionActive = false;
@@ -2161,6 +2384,7 @@
           setStatus("Ready");
         },
         onCancel: function (payload) {
+          liveNoteFeedback.stopPlayhead();
           clearMissTimeouts();
           appState.loopTapSets = payload.loopTapsMs;
           appState.isSessionActive = false;
@@ -2175,6 +2399,7 @@
         },
       });
     } catch (error) {
+      liveNoteFeedback.stopPlayhead();
       clearMissTimeouts();
       appState.isSessionActive = false;
       setButtonsDisabled(false);
