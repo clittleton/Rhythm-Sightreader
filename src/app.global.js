@@ -1917,6 +1917,11 @@
     timelineStrip: document.getElementById("timelineStrip"),
     liveTimingFeedback: document.getElementById("liveTimingFeedback"),
     liveTimingText: document.getElementById("liveTimingText"),
+    toggleLogBtn: document.getElementById("toggleLogBtn"),
+    sessionLogPanel: document.getElementById("sessionLogPanel"),
+    clearLogBtn: document.getElementById("clearLogBtn"),
+    sessionLogBody: document.getElementById("sessionLogBody"),
+    sessionLogEmpty: document.getElementById("sessionLogEmpty"),
   };
 
   const metronome = new Metronome();
@@ -1929,6 +1934,9 @@
     selectedTempoBpm: null,
     isSessionActive: false,
     isSpaceHeld: false,
+    sessionLogEntries: [],
+    nextAttemptNumber: 1,
+    isLogOpen: false,
   };
 
   function clampTempo(value) {
@@ -1961,6 +1969,123 @@
   function setBeatIndicator(active, label) {
     ui.beatIndicator.classList.toggle("active", !!active);
     ui.beatText.textContent = label;
+  }
+
+  function formatSessionLogTime(timestampMs) {
+    return new Date(timestampMs).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  }
+
+  function formatSessionLogAccuracy(accuracy) {
+    return typeof accuracy === "number" ? accuracy + "%" : "-";
+  }
+
+  function formatSessionLogCount(value) {
+    return typeof value === "number" ? String(value) : "-";
+  }
+
+  function refreshSessionLogVisibility() {
+    if (!ui.sessionLogBody || !ui.sessionLogEmpty) {
+      return;
+    }
+    const hasEntries = appState.sessionLogEntries.length > 0;
+    ui.sessionLogEmpty.hidden = hasEntries;
+    const tableWrap = ui.sessionLogBody.closest(".table-wrap");
+    if (tableWrap) {
+      tableWrap.hidden = !hasEntries;
+    }
+  }
+
+  function updateSessionLogToggleLabel() {
+    if (!ui.toggleLogBtn) {
+      return;
+    }
+    const prefix = appState.isLogOpen ? "Hide" : "Show";
+    ui.toggleLogBtn.textContent = prefix + " Session Log (" + appState.sessionLogEntries.length + ")";
+  }
+
+  function setSessionLogOpen(open) {
+    if (!ui.toggleLogBtn || !ui.sessionLogPanel) {
+      return;
+    }
+    appState.isLogOpen = !!open;
+    ui.sessionLogPanel.hidden = !appState.isLogOpen;
+    ui.toggleLogBtn.setAttribute("aria-expanded", String(appState.isLogOpen));
+    updateSessionLogToggleLabel();
+  }
+
+  function buildSessionLogRow(entry) {
+    const row = document.createElement("tr");
+
+    const addTextCell = function (value) {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      row.append(cell);
+    };
+
+    addTextCell(String(entry.attemptNumber));
+    addTextCell(formatSessionLogTime(entry.timestampMs));
+    addTextCell("Level " + entry.level);
+    addTextCell(entry.modeLabel);
+    addTextCell(entry.tempoBpm + " BPM");
+    addTextCell(formatSessionLogAccuracy(entry.accuracy));
+    addTextCell(formatSessionLogCount(entry.taps));
+    addTextCell(formatSessionLogCount(entry.missed));
+    addTextCell(formatSessionLogCount(entry.extra));
+
+    const statusCell = document.createElement("td");
+    const statusBadge = document.createElement("span");
+    statusBadge.className = "session-log-status " + entry.statusClass;
+    statusBadge.textContent = entry.statusLabel;
+    statusCell.append(statusBadge);
+    row.append(statusCell);
+
+    return row;
+  }
+
+  function appendSessionLogEntry(entry) {
+    if (!ui.sessionLogBody) {
+      return;
+    }
+    appState.sessionLogEntries.push(entry);
+    ui.sessionLogBody.append(buildSessionLogRow(entry));
+    refreshSessionLogVisibility();
+    updateSessionLogToggleLabel();
+  }
+
+  function addSessionLogEntry(args) {
+    const labelsByStatus = {
+      completed: "Completed",
+      cancelled: "Cancelled",
+      error: "Error",
+    };
+    const statusClass = Object.hasOwn(labelsByStatus, args.status) ? args.status : "completed";
+    appendSessionLogEntry({
+      attemptNumber: args.attemptNumber,
+      timestampMs: Date.now(),
+      level: args.level,
+      modeLabel: args.loops === 1 ? "Single" : "Loop x" + args.loops,
+      tempoBpm: args.tempoBpm,
+      accuracy: typeof args.accuracy === "number" ? args.accuracy : null,
+      taps: typeof args.taps === "number" ? args.taps : null,
+      missed: typeof args.missed === "number" ? args.missed : null,
+      extra: typeof args.extra === "number" ? args.extra : null,
+      statusClass: statusClass,
+      statusLabel: labelsByStatus[statusClass],
+    });
+  }
+
+  function clearSessionLog() {
+    appState.sessionLogEntries = [];
+    appState.nextAttemptNumber = 1;
+    if (ui.sessionLogBody) {
+      ui.sessionLogBody.innerHTML = "";
+    }
+    refreshSessionLogVisibility();
+    updateSessionLogToggleLabel();
   }
 
   function timingClassFromOffset(offsetMs) {
@@ -2217,6 +2342,8 @@
       }),
       expectedOnsetsMs: [...appState.exercise.expectedOnsetsMs],
     };
+    const attemptNumber = appState.nextAttemptNumber;
+    appState.nextAttemptNumber += 1;
 
     resetResults();
     const liveNoteFeedback = renderNotation(ui.notationContainer, sessionExercise, []);
@@ -2328,6 +2455,9 @@
           setButtonsDisabled(false);
           setBeatIndicator(false, "Finished");
           resetLiveTimingFeedback("Session complete");
+          const recordedTaps = payload.loopTapsMs.reduce(function (sum, taps) {
+            return sum + taps.length;
+          }, 0);
 
           if (loops === 1) {
             const result = gradeAttempt(sessionExercise.expectedOnsetsMs, payload.loopTapsMs[0]);
@@ -2350,11 +2480,28 @@
             ui.timelineStrip.innerHTML = "";
             setTapStatus("Completed. Recorded " + payload.loopTapsMs[0].length + " taps.");
             setStatus("Ready");
+            addSessionLogEntry({
+              attemptNumber: attemptNumber,
+              level: sessionExercise.level,
+              loops: loops,
+              tempoBpm: sessionExercise.tempoBpm,
+              accuracy: result.overallAccuracy,
+              taps: recordedTaps,
+              missed: result.missedCount,
+              extra: result.extraTapCount,
+              status: "completed",
+            });
             return;
           }
 
           const challenge = gradeChallenge(sessionExercise.expectedOnsetsMs, payload.loopTapsMs);
           appState.loopResults = challenge.loopResults;
+          const totalMissed = challenge.loopResults.reduce(function (sum, item) {
+            return sum + item.missedCount;
+          }, 0);
+          const totalExtra = challenge.loopResults.reduce(function (sum, item) {
+            return sum + item.extraTapCount;
+          }, 0);
           renderNotation(
             ui.notationContainer,
             sessionExercise,
@@ -2373,8 +2520,8 @@
             {
               overallAccuracy: challenge.averageScore,
               timingLabel: "mixed",
-              missedCount: challenge.loopResults.reduce((sum, item) => sum + item.missedCount, 0),
-              extraTapCount: challenge.loopResults.reduce((sum, item) => sum + item.extraTapCount, 0),
+              missedCount: totalMissed,
+              extraTapCount: totalExtra,
             },
             "Challenge Avg",
           );
@@ -2382,6 +2529,17 @@
           renderLoopBreakdown(ui.loopBreakdown, challenge.loopResults, challenge.averageScore);
           addLoopButtons(challenge.loopResults.length);
           showLoopDetail(0);
+          addSessionLogEntry({
+            attemptNumber: attemptNumber,
+            level: sessionExercise.level,
+            loops: loops,
+            tempoBpm: sessionExercise.tempoBpm,
+            accuracy: challenge.averageScore,
+            taps: recordedTaps,
+            missed: totalMissed,
+            extra: totalExtra,
+            status: "completed",
+          });
           setStatus("Ready");
         },
         onCancel: function (payload) {
@@ -2397,6 +2555,17 @@
             return sum + taps.length;
           }, 0);
           setTapStatus("Cancelled. Recorded " + recordedTaps + " taps.");
+          addSessionLogEntry({
+            attemptNumber: attemptNumber,
+            level: sessionExercise.level,
+            loops: loops,
+            tempoBpm: sessionExercise.tempoBpm,
+            accuracy: null,
+            taps: recordedTaps,
+            missed: null,
+            extra: null,
+            status: "cancelled",
+          });
         },
       });
     } catch (error) {
@@ -2408,6 +2577,17 @@
       setBeatIndicator(false, "Error");
       setTapStatus("Session failed: " + error.message);
       resetLiveTimingFeedback("Session failed");
+      addSessionLogEntry({
+        attemptNumber: attemptNumber,
+        level: sessionExercise.level,
+        loops: loops,
+        tempoBpm: sessionExercise.tempoBpm,
+        accuracy: null,
+        taps: totalTapCount,
+        missed: null,
+        extra: null,
+        status: "error",
+      });
     }
   }
 
@@ -2467,6 +2647,16 @@
     ui.clickSoundSelect.addEventListener("change", function (event) {
       metronome.setSoundMode(event.target.value);
     });
+    if (ui.toggleLogBtn) {
+      ui.toggleLogBtn.addEventListener("click", function () {
+        setSessionLogOpen(!appState.isLogOpen);
+      });
+    }
+    if (ui.clearLogBtn) {
+      ui.clearLogBtn.addEventListener("click", function () {
+        clearSessionLog();
+      });
+    }
   }
 
   function init() {
@@ -2475,6 +2665,8 @@
     wireControls();
     installKeyboardCapture();
     setButtonsDisabled(false);
+    refreshSessionLogVisibility();
+    setSessionLogOpen(false);
     resetLiveTimingFeedback();
     generateNewExercise();
   }

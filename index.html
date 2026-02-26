@@ -78,14 +78,52 @@
       </section>
 
       <section class="results-panel">
-        <div class="panel-heading">
+        <div class="panel-heading results-heading">
           <h2>Performance Feedback</h2>
-          <p id="tapStatus">No taps recorded.</p>
+          <div class="results-heading-meta">
+            <p id="tapStatus">No taps recorded.</p>
+            <button
+              id="toggleLogBtn"
+              class="log-toggle-btn"
+              type="button"
+              aria-expanded="false"
+              aria-controls="sessionLogPanel"
+            >
+              Show Session Log
+            </button>
+          </div>
         </div>
         <div id="liveTimingFeedback" class="live-timing" aria-live="polite">
           <span class="live-dot"></span>
           <strong id="liveTimingText">Waiting for first tap</strong>
         </div>
+
+        <section id="sessionLogPanel" class="session-log-panel" hidden>
+          <div class="session-log-header">
+            <h3>Session History</h3>
+            <button id="clearLogBtn" type="button">Clear</button>
+          </div>
+          <p id="sessionLogEmpty" class="session-log-empty">No attempts logged yet.</p>
+          <div class="table-wrap">
+            <table class="session-log-table">
+              <thead>
+                <tr>
+                  <th>Attempt</th>
+                  <th>Time</th>
+                  <th>Level</th>
+                  <th>Mode</th>
+                  <th>Tempo</th>
+                  <th>Accuracy</th>
+                  <th>Taps</th>
+                  <th>Missed</th>
+                  <th>Extra</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="sessionLogBody"></tbody>
+            </table>
+          </div>
+        </section>
 
         <div id="summaryCards" class="summary-cards"></div>
         <div id="loopBreakdown" class="loop-breakdown"></div>
