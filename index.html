@@ -15,6 +15,41 @@
     <script src="https://cdn.jsdelivr.net/npm/tone@15.0.4/build/Tone.js"></script>
   </head>
   <body>
+    <section id="arcadeOverlay" class="arcade-overlay">
+      <div class="overlay-card">
+        <p id="overlayEyebrow" class="overlay-eyebrow">Arcade Mode</p>
+        <h2 id="overlayTitle">Rhythm Rush</h2>
+        <p id="overlayText" class="overlay-text">
+          Choose a starting level, then survive the endless rhythm stream for as long as you can.
+        </p>
+        <div id="overlayLevelGroup" class="overlay-level-group">
+          <label for="startLevelSelect">Starting Level</label>
+          <select id="startLevelSelect" aria-label="Starting level"></select>
+        </div>
+        <div id="overlayTempoGroup" class="overlay-level-group">
+          <label for="overlayTempoInput">Starting Tempo</label>
+          <div class="overlay-tempo-row">
+            <input id="overlayTempoSlider" type="range" min="40" max="220" step="1" value="90" />
+            <input
+              id="overlayTempoInput"
+              type="number"
+              min="40"
+              max="220"
+              step="1"
+              value="90"
+              aria-label="Starting tempo BPM"
+            />
+            <span>BPM</span>
+          </div>
+        </div>
+        <div class="overlay-actions">
+          <button id="overlayPrimaryBtn" class="overlay-primary-btn" type="button">
+            Start Run (Return)
+          </button>
+        </div>
+      </div>
+    </section>
+
     <main class="app-shell">
       <header class="hero">
         <p class="eyebrow">Percussion Studio</p>
@@ -23,6 +58,64 @@
           Generate a rhythm, perform it on the spacebar, and get millisecond-precise timing feedback.
         </p>
       </header>
+
+      <section class="arcade-hud" aria-label="Arcade session stats">
+        <div class="hud-grid">
+          <article class="hud-card score-card">
+            <p>SCORE</p>
+            <strong id="arcadeScoreValue">0</strong>
+          </article>
+          <article class="hud-card level-card">
+            <p>LEVEL</p>
+            <strong id="arcadeLevelValue">1</strong>
+          </article>
+          <article class="hud-card">
+            <p>COMBO</p>
+            <strong id="arcadeComboValue">x0</strong>
+          </article>
+          <article class="hud-card chain-card compact-card">
+            <p>SET CHAIN</p>
+            <strong id="arcadeSetChainValue">x0</strong>
+          </article>
+          <article class="hud-card lives-card">
+            <p>LIVES</p>
+            <strong id="arcadeLivesValue">3</strong>
+          </article>
+          <article class="hud-card compact-card">
+            <p>HIGH SCORE</p>
+            <strong id="arcadeHighScoreValue">0</strong>
+          </article>
+          <article class="hud-card compact-card">
+            <p>STREAK</p>
+            <strong id="arcadeStreakValue">0</strong>
+          </article>
+          <article class="hud-card compact-card">
+            <p>MULTIPLIER</p>
+            <strong id="arcadeMultiplierValue">x1</strong>
+          </article>
+          <article class="hud-card rank-card compact-card">
+            <p>RANK</p>
+            <strong id="arcadeRankValue">C</strong>
+          </article>
+        </div>
+        <div class="hud-meters">
+          <div class="meter-block">
+            <p>Shield</p>
+            <div class="meter-track">
+              <span id="arcadeHealthFill"></span>
+            </div>
+            <strong id="arcadeHealthValue">100%</strong>
+          </div>
+          <div class="meter-block">
+            <p>Hype</p>
+            <div class="meter-track">
+              <span id="arcadeHypeFill"></span>
+            </div>
+            <strong id="arcadeHypeValue">0%</strong>
+          </div>
+        </div>
+        <p id="arcadeBanner" class="arcade-banner" aria-live="polite">READY PLAYER ONE</p>
+      </section>
 
       <section class="control-panel">
         <label for="levelSelect">Level</label>
@@ -69,15 +162,15 @@
         </div>
       </section>
 
-      <section class="notation-panel">
+      <section class="notation-panel" id="notationPanel">
         <div class="panel-heading">
-          <h2>Notation</h2>
-          <p>Press <kbd>Space</kbd> to perform once playback starts.</p>
+          <h2>Rhythm Stream</h2>
+          <p>Press <kbd>Space</kbd> when the active line starts. New lines keep scrolling until you lose a life.</p>
         </div>
         <div id="notationContainer" class="notation-container" role="img" aria-label="Generated rhythm notation"></div>
       </section>
 
-      <section class="results-panel">
+      <section class="results-panel" id="resultsPanel">
         <div class="panel-heading results-heading">
           <h2>Performance Feedback</h2>
           <div class="results-heading-meta">
@@ -127,28 +220,42 @@
 
         <div id="summaryCards" class="summary-cards"></div>
         <div id="loopBreakdown" class="loop-breakdown"></div>
-
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Note #</th>
-                <th>Expected (ms)</th>
-                <th>Actual (ms)</th>
-                <th>Offset (ms)</th>
-                <th>Result</th>
-              </tr>
-            </thead>
-            <tbody id="feedbackTableBody"></tbody>
-          </table>
-        </div>
-
-        <div class="timeline-area">
-          <h3>Timing Timeline</h3>
-          <div id="timelineStrip"></div>
-        </div>
       </section>
+
+      <div id="arcadeFxLayer" class="arcade-fx-layer" aria-hidden="true"></div>
     </main>
+
+    <section id="gameOverModal" class="game-over-modal" hidden>
+      <div class="game-over-card">
+        <p class="overlay-eyebrow">Run Complete</p>
+        <h2 id="gameOverTitle">Game Over</h2>
+        <p class="game-over-score-label">Final Score</p>
+        <strong id="gameOverScoreValue" class="game-over-score-value">0</strong>
+        <div class="game-over-grid">
+          <article class="game-over-stat">
+            <p>Rhythms Cleared</p>
+            <strong id="gameOverRhythmsValue">0</strong>
+          </article>
+          <article class="game-over-stat">
+            <p>Peak Level</p>
+            <strong id="gameOverPeakLevelValue">1</strong>
+          </article>
+          <article class="game-over-stat">
+            <p>Best Combo</p>
+            <strong id="gameOverBestComboValue">0</strong>
+          </article>
+          <article class="game-over-stat">
+            <p>Best Chain</p>
+            <strong id="gameOverBestChainValue">0</strong>
+          </article>
+        </div>
+        <div class="overlay-actions">
+          <button id="playAgainBtn" class="overlay-primary-btn" type="button">
+            Back To Start (Return)
+          </button>
+        </div>
+      </div>
+    </section>
 
     <script src="./src/app.global.js"></script>
   </body>

@@ -108,6 +108,23 @@
     return { num: num, den: den };
   }
 
+  function cloneTimeSignature(timeSignature) {
+    if (!timeSignature) {
+      return null;
+    }
+    return {
+      num: Number(timeSignature.num),
+      den: Number(timeSignature.den),
+    };
+  }
+
+  function timeSignatureToString(timeSignature) {
+    if (!timeSignature) {
+      return "";
+    }
+    return String(timeSignature.num) + "/" + String(timeSignature.den);
+  }
+
   function getMeasureTicks(timeSignature) {
     return (PPQ * 4 * timeSignature.num) / timeSignature.den;
   }
@@ -279,15 +296,23 @@
     return Math.round(totalTicks * msPerTick);
   }
 
-  function generateExercise(levelConfig) {
+  function generateExercise(levelConfig, options) {
+    const config = options || {};
     for (let attempt = 0; attempt < 240; attempt += 1) {
-      const timeSignature = chooseTimeSignature(levelConfig);
-      const tempoBpm = chooseTempo(levelConfig);
+      const timeSignature = config.timeSignature
+        ? { ...config.timeSignature }
+        : chooseTimeSignature(levelConfig);
+      const tempoBpm =
+        typeof config.tempoBpm === "number" ? clampTempo(config.tempoBpm) : chooseTempo(levelConfig);
+      const measuresPerExercise = Math.max(
+        1,
+        Number(config.measuresPerExercise) || levelConfig.measuresPerExercise,
+      );
       const measureTicks = getMeasureTicks(timeSignature);
       let notes = [];
 
       try {
-        for (let measure = 0; measure < levelConfig.measuresPerExercise; measure += 1) {
+        for (let measure = 0; measure < measuresPerExercise; measure += 1) {
           const measureStartTick = measure * measureTicks;
           notes = notes.concat(
             generateMeasure(levelConfig, timeSignature, measureStartTick, measureTicks),
@@ -309,7 +334,7 @@
         notes: notes,
         expectedOnsetsMs: expectedOnsetsMs,
         measureTicks: measureTicks,
-        measuresPerExercise: levelConfig.measuresPerExercise,
+        measuresPerExercise: measuresPerExercise,
         totalDurationMs: getExerciseDurationMs(notes, tempoBpm),
       };
     }
@@ -534,13 +559,24 @@
   }
 
   function clearFeedback(view) {
-    view.summaryCardsEl.innerHTML = "";
-    view.tableBodyEl.innerHTML = "";
-    view.timelineEl.innerHTML = "";
-    view.loopBreakdownEl.innerHTML = "";
+    if (view.summaryCardsEl) {
+      view.summaryCardsEl.innerHTML = "";
+    }
+    if (view.tableBodyEl) {
+      view.tableBodyEl.innerHTML = "";
+    }
+    if (view.timelineEl) {
+      view.timelineEl.innerHTML = "";
+    }
+    if (view.loopBreakdownEl) {
+      view.loopBreakdownEl.innerHTML = "";
+    }
   }
 
   function renderSummaryCards(summaryCardsEl, result, title) {
+    if (!summaryCardsEl) {
+      return;
+    }
     const safeTitle = title || "Attempt";
     summaryCardsEl.innerHTML = "";
 
@@ -560,6 +596,9 @@
   }
 
   function renderLoopBreakdown(loopBreakdownEl, loopResults, averageScore) {
+    if (!loopBreakdownEl) {
+      return;
+    }
     loopBreakdownEl.innerHTML = "";
     const averageChip = document.createElement("div");
     averageChip.className = "loop-pill";
@@ -576,6 +615,9 @@
   }
 
   function renderAttemptTable(tableBodyEl, expectedOnsetsMs, tapsMs, result) {
+    if (!tableBodyEl) {
+      return;
+    }
     tableBodyEl.innerHTML = "";
 
     expectedOnsetsMs.forEach(function (expected, noteIndex) {
@@ -603,6 +645,9 @@
   }
 
   function renderTimeline(timelineEl, result) {
+    if (!timelineEl) {
+      return;
+    }
     timelineEl.innerHTML = "";
 
     result.tapOffsetsMs.forEach(function (offset, idx) {
@@ -838,6 +883,207 @@
     return displayTokens;
   }
 
+  function validateExerciseForDisplay(exercise) {
+    if (!exercise || !Array.isArray(exercise.notes) || !exercise.notes.length) {
+      throw new Error("Generated exercise has no notes.");
+    }
+    if (!Number.isFinite(exercise.measureTicks) || exercise.measureTicks <= 0) {
+      throw new Error("Generated exercise has invalid measure length.");
+    }
+    if (!Number.isInteger(exercise.measuresPerExercise) || exercise.measuresPerExercise < 1) {
+      throw new Error("Generated exercise has invalid measure count.");
+    }
+
+    const groupedMeasures = splitByMeasure(
+      exercise.notes,
+      exercise.measuresPerExercise,
+      exercise.measureTicks,
+    );
+
+    groupedMeasures.forEach(function (measureTokens, measureIndex) {
+      const measureNumber = measureIndex + 1;
+      if (!measureTokens.length) {
+        throw new Error("Generated empty measure " + measureNumber + ".");
+      }
+
+      const measureStartTick = measureIndex * exercise.measureTicks;
+      const measureEndTick = measureStartTick + exercise.measureTicks;
+      const totalTicks = measureTokens.reduce(function (sum, entry) {
+        const tokenTicks = DURATION_TICKS[entry.token.durationCode];
+        if (!tokenTicks) {
+          throw new Error("Unsupported token duration in measure " + measureNumber + ".");
+        }
+        if (
+          entry.token.beatStartTicks < measureStartTick ||
+          entry.token.beatStartTicks >= measureEndTick
+        ) {
+          throw new Error("Token escaped measure " + measureNumber + ".");
+        }
+        return sum + tokenTicks;
+      }, 0);
+
+      if (totalTicks !== exercise.measureTicks) {
+        throw new Error("Measure " + measureNumber + " does not fill the bar.");
+      }
+
+      const beatBoundaries = getBeatBoundaries(
+        measureStartTick,
+        exercise.measureTicks,
+        exercise.timeSignature,
+      );
+      const displayTokens = expandMeasureTokensForDisplay(
+        measureTokens,
+        beatBoundaries,
+        measureEndTick,
+      );
+
+      if (!displayTokens.length) {
+        throw new Error("Measure " + measureNumber + " has no displayable notes.");
+      }
+    });
+
+    if (!Array.isArray(exercise.expectedOnsetsMs) || !exercise.expectedOnsetsMs.length) {
+      throw new Error("Generated exercise has no playable onsets.");
+    }
+
+    return true;
+  }
+
+  function createValidatedExercise(levelConfig, options) {
+    let lastError = null;
+    for (let attempt = 0; attempt < 48; attempt += 1) {
+      try {
+        const exercise = generateExercise(levelConfig, options);
+        validateExerciseForDisplay(exercise);
+        validateExerciseRenderableWithVexFlow(exercise);
+        return exercise;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    recordArcadeDiagnostic("generation-failed", {
+      level: levelConfig?.id || null,
+      options: options || null,
+      error: lastError ? lastError.message : "unknown",
+    });
+
+    throw new Error(
+      "Failed to generate a renderable exercise" + (lastError ? ": " + lastError.message : "."),
+    );
+  }
+
+  function validateExerciseRenderableWithVexFlow(exercise) {
+    if (
+      typeof window === "undefined" ||
+      typeof document === "undefined" ||
+      !document.body ||
+      !window.Vex ||
+      !window.Vex.Flow
+    ) {
+      return true;
+    }
+
+    const VF = assertVexFlow();
+    const sandbox = document.createElement("div");
+    sandbox.setAttribute("aria-hidden", "true");
+    sandbox.style.position = "absolute";
+    sandbox.style.left = "-99999px";
+    sandbox.style.top = "-99999px";
+    sandbox.style.width = "960px";
+    sandbox.style.height = "240px";
+    sandbox.style.overflow = "hidden";
+    sandbox.style.opacity = "0";
+    sandbox.style.pointerEvents = "none";
+    document.body.append(sandbox);
+
+    try {
+      const renderer = new VF.Renderer(sandbox, VF.Renderer.Backends.SVG);
+      renderer.resize(960, 240);
+      drawExerciseSystem({
+        VF: VF,
+        context: renderer.getContext(),
+        exercise: exercise,
+        topY: 34,
+        width: 960,
+        showTimeSignature: true,
+      });
+      return true;
+    } finally {
+      sandbox.remove();
+    }
+  }
+
+  function getArcadeOpeningTimeSignature(levelId) {
+    const levelConfig = getLevelConfig(levelId);
+    return parseTimeSignature(levelConfig.allowedTimeSignatures[0] || "4/4");
+  }
+
+  function getNextArcadeTimeSignature(levelId, currentTimeSignature) {
+    const levelConfig = getLevelConfig(levelId);
+    const allowed = Array.isArray(levelConfig.allowedTimeSignatures)
+      ? levelConfig.allowedTimeSignatures
+      : [];
+
+    if (!allowed.length) {
+      return parseTimeSignature("4/4");
+    }
+
+    const currentKey = timeSignatureToString(currentTimeSignature);
+    const currentIndex = allowed.indexOf(currentKey);
+    if (currentIndex === -1) {
+      return parseTimeSignature(allowed[0]);
+    }
+
+    return parseTimeSignature(allowed[Math.min(allowed.length - 1, currentIndex + 1)]);
+  }
+
+  function maybeAdvanceArcadeTimeSignature(result) {
+    const levelConfig = getLevelConfig(appState.arcade.currentLevel);
+    const allowed = Array.isArray(levelConfig.allowedTimeSignatures)
+      ? levelConfig.allowedTimeSignatures
+      : [];
+    if (!allowed.length) {
+      return;
+    }
+
+    const currentKey = timeSignatureToString(appState.arcade.currentTimeSignature);
+    if (!currentKey || !allowed.includes(currentKey)) {
+      appState.arcade.currentTimeSignature = getArcadeOpeningTimeSignature(appState.arcade.currentLevel);
+      return;
+    }
+
+    const strongClear =
+      !!result &&
+      result.overallAccuracy >= 88 &&
+      result.missedCount <= 1 &&
+      result.extraTapCount <= 1;
+    const shouldAdvance = strongClear && appState.arcade.rhythmsCleared > 0 && appState.arcade.rhythmsCleared % 3 === 0;
+
+    if (!shouldAdvance) {
+      return;
+    }
+
+    const nextTimeSignature = getNextArcadeTimeSignature(
+      appState.arcade.currentLevel,
+      appState.arcade.currentTimeSignature,
+    );
+    const nextKey = timeSignatureToString(nextTimeSignature);
+    if (!nextKey || nextKey === currentKey) {
+      return;
+    }
+
+    appState.arcade.currentTimeSignature = nextTimeSignature;
+    recordArcadeDiagnostic("meter-change-planned", {
+      level: appState.arcade.currentLevel,
+      from: currentKey,
+      to: nextKey,
+      rhythmsCleared: appState.arcade.rhythmsCleared,
+    });
+    setArcadeBanner("METER SHIFT " + nextKey, "boost");
+    spawnArcadeFloat(nextKey, "boost", "md");
+  }
+
   function hideFlagsForBeamedNotes(beams) {
     beams.forEach(function (beam) {
       const beamNotes = typeof beam.getNotes === "function" ? beam.getNotes() : beam.notes;
@@ -941,6 +1187,7 @@
     expectedOnsetsMs,
     loopDurationMs,
     timelineBounds,
+    options,
   ) {
     if (
       !Array.isArray(onsetAnchors) ||
@@ -988,6 +1235,8 @@
     let rafId = null;
     let running = false;
     let startedAtMs = 0;
+    const config = options || {};
+    const onProgress = typeof config.onProgress === "function" ? config.onProgress : null;
     let activeLoopMs = Math.max(
       1,
       loopDurationMs || expectedOnsetsMs[expectedOnsetsMs.length - 1] || 1,
@@ -1026,20 +1275,33 @@
       if (!running) {
         return;
       }
-      const elapsedMs = nowMs - startedAtMs;
-      placeLineAtMs(elapsedMs);
-      if (elapsedMs >= activeLoopMs) {
+      try {
+        const elapsedMs = nowMs - startedAtMs;
+        placeLineAtMs(elapsedMs);
+        if (onProgress) {
+          onProgress(Math.max(0, Math.min(activeLoopMs, elapsedMs)), activeLoopMs);
+        }
+        if (elapsedMs >= activeLoopMs) {
+          stopPlayhead();
+          return;
+        }
+        rafId = requestAnimationFrame(tick);
+      } catch (error) {
         stopPlayhead();
-        return;
+        handleArcadeRuntimeError(error, {
+          label: "playhead-raf",
+        });
       }
-      rafId = requestAnimationFrame(tick);
     };
 
-    const startPlayhead = function (loopMs) {
+    const startPlayhead = function (loopMs, originMs) {
       stopPlayhead();
       activeLoopMs = Math.max(1, loopMs || activeLoopMs);
-      startedAtMs = performance.now();
+      startedAtMs = typeof originMs === "number" ? originMs : performance.now();
       placeLineAtMs(0);
+      if (onProgress) {
+        onProgress(0, activeLoopMs);
+      }
       line.setAttribute("opacity", "0.95");
       running = true;
       rafId = requestAnimationFrame(tick);
@@ -1057,6 +1319,7 @@
     expectedOnsetsMs,
     totalDurationMs,
     timelineBounds,
+    options,
   ) {
     if (
       !Array.isArray(onsetAnchors) ||
@@ -1203,6 +1466,7 @@
       expectedOnsetsMs,
       totalDurationMs,
       timelineBounds,
+      options,
     );
 
     return {
@@ -1293,8 +1557,8 @@
     return startX + (endX - startX) * ratio;
   }
 
-  function drawNotationAnalysisRows(
-    container,
+  function drawNotationAnalysisRowsOnSvg(
+    svg,
     onsetAnchors,
     expectedOnsetsMs,
     totalDurationMs,
@@ -1311,7 +1575,6 @@
       return;
     }
 
-    const svg = container.querySelector("svg");
     if (!svg) {
       return;
     }
@@ -1387,37 +1650,43 @@
     svg.append(layer);
   }
 
-  function renderNotation(container, exercise, analysisRows) {
-    if (!exercise) {
-      container.innerHTML = "";
-      return NOOP_LIVE_FEEDBACK;
+  function drawNotationAnalysisRows(
+    container,
+    onsetAnchors,
+    expectedOnsetsMs,
+    totalDurationMs,
+    timelineBounds,
+    analysisRows,
+  ) {
+    const svg = container.querySelector("svg");
+    if (!svg) {
+      return;
     }
+    drawNotationAnalysisRowsOnSvg(
+      svg,
+      onsetAnchors,
+      expectedOnsetsMs,
+      totalDurationMs,
+      timelineBounds,
+      analysisRows,
+    );
+  }
 
-    let VF;
-    try {
-      VF = assertVexFlow();
-    } catch (error) {
-      renderFallback(container, error.message);
-      return NOOP_LIVE_FEEDBACK;
-    }
-
-    container.innerHTML = "";
-
-    const width = Math.max(760, container.clientWidth || 760);
-    const rowCount = Array.isArray(analysisRows) ? analysisRows.length : 0;
-    const height = 210 + rowCount * 24;
-    const renderer = new VF.Renderer(container, VF.Renderer.Backends.SVG);
-    renderer.resize(width, height);
-    const context = renderer.getContext();
+  function drawExerciseSystem(args) {
+    const VF = args.VF;
+    const context = args.context;
+    const exercise = args.exercise;
+    const topY = typeof args.topY === "number" ? args.topY : 34;
+    const width = Math.max(760, Number(args.width) || 760);
+    const showTimeSignature = args.showTimeSignature !== false;
+    const leftPadding = typeof args.leftPadding === "number" ? args.leftPadding : 12;
+    const measureGap = typeof args.measureGap === "number" ? args.measureGap : 0;
 
     const groupedMeasures = splitByMeasure(
       exercise.notes,
       exercise.measuresPerExercise,
       exercise.measureTicks,
     );
-
-    const leftPadding = 12;
-    const measureGap = 10;
     const innerWidth = width - leftPadding * 2;
     const measureWidth =
       (innerWidth - measureGap * (exercise.measuresPerExercise - 1)) / exercise.measuresPerExercise;
@@ -1441,13 +1710,13 @@
       );
 
       const staveX = leftPadding + measureIndex * (measureWidth + measureGap);
-      const stave = new VF.Stave(staveX, 34, measureWidth);
+      const stave = new VF.Stave(staveX, topY, measureWidth);
       if (firstStaveLeftX === null) {
         firstStaveLeftX = staveX;
       }
       lastStaveRightX = staveX + measureWidth;
 
-      if (measureIndex === 0) {
+      if (measureIndex === 0 && showTimeSignature) {
         stave.addTimeSignature(exercise.timeSignature.num + "/" + exercise.timeSignature.den);
       }
 
@@ -1473,7 +1742,35 @@
       });
 
       voice.addTickables(notes);
-      new VF.Formatter().joinVoices([voice]).format([voice], measureWidth - 24);
+      if (typeof voice.setStave === "function") {
+        voice.setStave(stave);
+      }
+      const formatter = new VF.Formatter().joinVoices([voice]);
+      const availableNoteWidth =
+        typeof stave.getNoteStartX === "function" && typeof stave.getNoteEndX === "function"
+          ? Math.max(1, stave.getNoteEndX() - stave.getNoteStartX())
+          : Math.max(40, measureWidth - (measureIndex === 0 && showTimeSignature ? 52 : 24));
+      if (typeof formatter.preCalculateMinTotalWidth === "function") {
+        formatter.preCalculateMinTotalWidth([voice]);
+        const minTotalWidth =
+          typeof formatter.getMinTotalWidth === "function" ? formatter.getMinTotalWidth() : null;
+        if (Number.isFinite(minTotalWidth) && minTotalWidth > availableNoteWidth + 6) {
+          throw new Error(
+            "Measure " +
+              (measureIndex + 1) +
+              " exceeds available notation width (" +
+              minTotalWidth.toFixed(1) +
+              " > " +
+              availableNoteWidth.toFixed(1) +
+              ").",
+          );
+        }
+      }
+      if (typeof formatter.formatToStave === "function") {
+        formatter.formatToStave([voice], stave);
+      } else {
+        formatter.format([voice], availableNoteWidth);
+      }
       const beamGroups = getBeamGroups(VF, exercise.timeSignature);
       const beams = VF.Beam.generateBeams(notes, {
         groups: beamGroups,
@@ -1493,7 +1790,7 @@
           const note = noteMap.get(localIndex);
           if (note) {
             const ys = typeof note.getYs === "function" ? note.getYs() : null;
-            const y = Array.isArray(ys) ? ys[0] : 90;
+            const y = Array.isArray(ys) ? ys[0] : topY + 56;
             onsetAnchors.push({
               x: note.getAbsoluteX(),
               y: y,
@@ -1529,26 +1826,62 @@
     tiesToDraw.forEach(function (tie) {
       tie.setContext(context).draw();
     });
-    const timelineBounds =
-      firstStaveLeftX === null || lastStaveRightX === null
-        ? null
-        : {
-            startX: firstStaveLeftX + 8,
-            endX: lastStaveRightX - 8,
-          };
+
+    return {
+      onsetAnchors: onsetAnchors,
+      timelineBounds:
+        firstStaveLeftX === null || lastStaveRightX === null
+          ? null
+          : {
+              startX: firstStaveLeftX + 8,
+              endX: lastStaveRightX - 8,
+            },
+    };
+  }
+
+  function renderNotation(container, exercise, analysisRows) {
+    if (!exercise) {
+      container.innerHTML = "";
+      return NOOP_LIVE_FEEDBACK;
+    }
+
+    let VF;
+    try {
+      VF = assertVexFlow();
+    } catch (error) {
+      renderFallback(container, error.message);
+      return NOOP_LIVE_FEEDBACK;
+    }
+
+    container.innerHTML = "";
+
+    const width = Math.max(760, container.clientWidth || 760);
+    const rowCount = Array.isArray(analysisRows) ? analysisRows.length : 0;
+    const height = 210 + rowCount * 24;
+    const renderer = new VF.Renderer(container, VF.Renderer.Backends.SVG);
+    renderer.resize(width, height);
+    const context = renderer.getContext();
+    const system = drawExerciseSystem({
+      VF: VF,
+      context: context,
+      exercise: exercise,
+      topY: 34,
+      width: width,
+      showTimeSignature: true,
+    });
     const liveNoteFeedback = createLiveNoteFeedbackLayer(
       container,
-      onsetAnchors,
+      system.onsetAnchors,
       exercise.expectedOnsetsMs,
       exercise.totalDurationMs,
-      timelineBounds,
+      system.timelineBounds,
     );
     drawNotationAnalysisRows(
       container,
-      onsetAnchors,
+      system.onsetAnchors,
       exercise.expectedOnsetsMs,
       exercise.totalDurationMs,
-      timelineBounds,
+      system.timelineBounds,
       analysisRows || [],
     );
     return liveNoteFeedback;
@@ -1922,10 +2255,47 @@
     clearLogBtn: document.getElementById("clearLogBtn"),
     sessionLogBody: document.getElementById("sessionLogBody"),
     sessionLogEmpty: document.getElementById("sessionLogEmpty"),
+    arcadeScoreValue: document.getElementById("arcadeScoreValue"),
+    arcadeLevelValue: document.getElementById("arcadeLevelValue"),
+    arcadeHighScoreValue: document.getElementById("arcadeHighScoreValue"),
+    arcadeComboValue: document.getElementById("arcadeComboValue"),
+    arcadeStreakValue: document.getElementById("arcadeStreakValue"),
+    arcadeMultiplierValue: document.getElementById("arcadeMultiplierValue"),
+    arcadeRankValue: document.getElementById("arcadeRankValue"),
+    arcadeSetChainValue: document.getElementById("arcadeSetChainValue"),
+    arcadeLivesValue: document.getElementById("arcadeLivesValue"),
+    arcadeHealthFill: document.getElementById("arcadeHealthFill"),
+    arcadeHealthValue: document.getElementById("arcadeHealthValue"),
+    arcadeHypeFill: document.getElementById("arcadeHypeFill"),
+    arcadeHypeValue: document.getElementById("arcadeHypeValue"),
+    arcadeBanner: document.getElementById("arcadeBanner"),
+    arcadeFxLayer: document.getElementById("arcadeFxLayer"),
+    notationPanel: document.getElementById("notationPanel"),
+    resultsPanel: document.getElementById("resultsPanel"),
+    appShell: document.querySelector(".app-shell"),
+    arcadeOverlay: document.getElementById("arcadeOverlay"),
+    overlayEyebrow: document.getElementById("overlayEyebrow"),
+    overlayTitle: document.getElementById("overlayTitle"),
+    overlayText: document.getElementById("overlayText"),
+    overlayLevelGroup: document.getElementById("overlayLevelGroup"),
+    overlayTempoGroup: document.getElementById("overlayTempoGroup"),
+    overlayPrimaryBtn: document.getElementById("overlayPrimaryBtn"),
+    startLevelSelect: document.getElementById("startLevelSelect"),
+    overlayTempoSlider: document.getElementById("overlayTempoSlider"),
+    overlayTempoInput: document.getElementById("overlayTempoInput"),
+    gameOverModal: document.getElementById("gameOverModal"),
+    gameOverTitle: document.getElementById("gameOverTitle"),
+    gameOverScoreValue: document.getElementById("gameOverScoreValue"),
+    gameOverRhythmsValue: document.getElementById("gameOverRhythmsValue"),
+    gameOverPeakLevelValue: document.getElementById("gameOverPeakLevelValue"),
+    gameOverBestComboValue: document.getElementById("gameOverBestComboValue"),
+    gameOverBestChainValue: document.getElementById("gameOverBestChainValue"),
+    playAgainBtn: document.getElementById("playAgainBtn"),
   };
 
   const metronome = new Metronome();
   const timingEngine = new TimingEngine({ metronome: metronome });
+  const ARCADE_STORAGE_KEY = "rhythm-sightreader-arcade-best-score";
 
   const appState = {
     exercise: null,
@@ -1937,6 +2307,52 @@
     sessionLogEntries: [],
     nextAttemptNumber: 1,
     isLogOpen: false,
+    rhythmIdCounter: 0,
+    currentRhythmId: 0,
+    lastSessionLoops: 1,
+    arcade: {
+      score: 0,
+      combo: 0,
+      streak: 0,
+      bestStreak: 0,
+      multiplier: 1,
+      health: 100,
+      hype: 0,
+      rank: "C",
+      bestScore: 0,
+      perfectHits: 0,
+      greatHits: 0,
+      goodHits: 0,
+      badHits: 0,
+      missHits: 0,
+      extraHits: 0,
+      rhythmSetChain: 0,
+      bestRhythmSetChain: 0,
+      lastQualifiedRhythmId: null,
+      maxLives: 3,
+      lives: 3,
+      gameOver: false,
+      runState: "title",
+      selectedStartLevel: 1,
+      currentLevel: 1,
+      peakLevel: 1,
+      strongClearStreak: 0,
+      rhythmsCleared: 0,
+      lastClearAccuracy: 0,
+      fixedTempoBpm: null,
+      currentTimeSignature: null,
+      measuresPerLine: 4,
+      lines: [],
+      activeLineIndex: 0,
+      streamPhase: "idle",
+      streamTimers: new Set(),
+      activeLineSession: null,
+      activeLiveFeedback: NOOP_LIVE_FEEDBACK,
+      latencyCompensationMs: 0,
+      scrollMetrics: null,
+      diagnostics: [],
+      lastGameOverSummary: null,
+    },
   };
 
   function clampTempo(value) {
@@ -1945,8 +2361,18 @@
 
   function syncTempoControls(bpm) {
     const clamped = clampTempo(bpm);
-    ui.tempoSlider.value = String(clamped);
-    ui.tempoInput.value = String(clamped);
+    if (ui.tempoSlider) {
+      ui.tempoSlider.value = String(clamped);
+    }
+    if (ui.tempoInput) {
+      ui.tempoInput.value = String(clamped);
+    }
+    if (ui.overlayTempoSlider) {
+      ui.overlayTempoSlider.value = String(clamped);
+    }
+    if (ui.overlayTempoInput) {
+      ui.overlayTempoInput.value = String(clamped);
+    }
     ui.tempoValue.textContent = String(clamped);
   }
 
@@ -1958,17 +2384,689 @@
     ui.tapStatus.textContent = text;
   }
 
+  function summarizeExerciseForDiagnostics(exercise) {
+    if (!exercise) {
+      return null;
+    }
+
+    return {
+      level: exercise.level,
+      timeSignature: exercise.timeSignature
+        ? exercise.timeSignature.num + "/" + exercise.timeSignature.den
+        : null,
+      tempoBpm: exercise.tempoBpm,
+      measuresPerExercise: exercise.measuresPerExercise,
+      noteCount: Array.isArray(exercise.notes) ? exercise.notes.length : 0,
+      expectedOnsets: Array.isArray(exercise.expectedOnsetsMs) ? exercise.expectedOnsetsMs.length : 0,
+    };
+  }
+
+  function summarizeQueuedArcadeLines(limit) {
+    const safeLimit = Math.max(1, Number(limit) || 4);
+    return appState.arcade.lines.slice(0, safeLimit).map(function (line, index) {
+      return {
+        queueIndex: index,
+        id: line.id,
+        exercise: summarizeExerciseForDiagnostics(line.exercise),
+      };
+    });
+  }
+
+  function recordArcadeDiagnostic(type, details) {
+    const entry = {
+      timestamp: new Date().toISOString(),
+      type: type,
+      details: details || {},
+    };
+    appState.arcade.diagnostics.push(entry);
+    if (appState.arcade.diagnostics.length > 40) {
+      appState.arcade.diagnostics.shift();
+    }
+    if (typeof window !== "undefined") {
+      window.__rhythmDiagnostics = appState.arcade.diagnostics.slice();
+    }
+    if (typeof console !== "undefined" && console.error) {
+      console.error("[RhythmDiagnostics]", entry);
+    }
+  }
+
+  function handleArcadeRuntimeError(error, context) {
+    const runtimeError =
+      error instanceof Error ? error : new Error(typeof error === "string" ? error : "Unknown runtime error.");
+
+    recordArcadeDiagnostic("runtime-error", {
+      context: context || null,
+      error: runtimeError.message,
+      stack: runtimeError.stack || null,
+      runState: appState.arcade.runState,
+      streamPhase: appState.arcade.streamPhase,
+      activeLine: summarizeExerciseForDiagnostics(getActiveArcadeLine()?.exercise || null),
+      queuedLines: summarizeQueuedArcadeLines(4),
+    });
+
+    if (
+      appState.isSessionActive ||
+      appState.arcade.runState === "active" ||
+      appState.arcade.runState === "paused"
+    ) {
+      pauseArcadeForRenderFailure(
+        "The stream hit an internal error and was paused. Press Return to regenerate the current line.",
+      );
+      return;
+    }
+
+    setStatus("Error");
+    setBeatIndicator(false, "Error");
+    setTapStatus("System error: " + runtimeError.message);
+    setArcadeBanner("SYSTEM ERROR", "bad");
+  }
+
   function setButtonsDisabled(disabled) {
     ui.generateBtn.disabled = disabled;
     ui.startBtn.disabled = disabled;
     ui.loopBtn.disabled = disabled;
     ui.levelSelect.disabled = disabled;
+    if (ui.tempoSlider) {
+      ui.tempoSlider.disabled = disabled;
+    }
+    if (ui.tempoInput) {
+      ui.tempoInput.disabled = disabled;
+    }
+    if (ui.clickSoundSelect) {
+      ui.clickSoundSelect.disabled = disabled;
+    }
     ui.cancelBtn.disabled = !disabled;
+  }
+
+  function setPostRunActionsMode(mode) {
+    if (!ui.postRunActions) {
+      return;
+    }
+    const safeMode = mode || "hidden";
+    const show = safeMode !== "hidden";
+    const isGameOver = safeMode === "gameover";
+
+    ui.postRunActions.hidden = !show;
+    ui.postRunActions.setAttribute("data-mode", safeMode);
+
+    if (ui.nextRhythmBtn) {
+      ui.nextRhythmBtn.hidden = isGameOver;
+    }
+    if (ui.retryRhythmBtn) {
+      ui.retryRhythmBtn.hidden = isGameOver;
+    }
+    if (ui.restartArcadeBtn) {
+      ui.restartArcadeBtn.hidden = !isGameOver;
+    }
+
+    if (!show) {
+      return;
+    }
+
+    const preferredButton = isGameOver ? ui.restartArcadeBtn : ui.nextRhythmBtn;
+    if (preferredButton && !preferredButton.hidden) {
+      preferredButton.focus();
+    }
   }
 
   function setBeatIndicator(active, label) {
     ui.beatIndicator.classList.toggle("active", !!active);
     ui.beatText.textContent = label;
+  }
+
+  function clampPercent(value) {
+    return Math.max(0, Math.min(100, Math.round(value)));
+  }
+
+  function safeGetArcadeBestScore() {
+    try {
+      const raw = window.localStorage.getItem(ARCADE_STORAGE_KEY);
+      const numeric = Number(raw);
+      if (!Number.isFinite(numeric)) {
+        return 0;
+      }
+      return Math.max(0, Math.round(numeric));
+    } catch (error) {
+      return 0;
+    }
+  }
+
+  function safeStoreArcadeBestScore(score) {
+    try {
+      window.localStorage.setItem(ARCADE_STORAGE_KEY, String(Math.max(0, Math.round(score))));
+    } catch (error) {
+      // Ignore storage errors in restrictive browser contexts.
+    }
+  }
+
+  function formatArcadeScore(score) {
+    return Math.max(0, Math.round(score)).toLocaleString();
+  }
+
+  function comboMultiplierFromCount(comboCount) {
+    if (comboCount >= 24) {
+      return 4;
+    }
+    if (comboCount >= 14) {
+      return 3;
+    }
+    if (comboCount >= 7) {
+      return 2;
+    }
+    return 1;
+  }
+
+  function liveRankFromArcadeState(arcade) {
+    const comboPressure = Math.min(100, arcade.combo * 4.8);
+    const weighted = arcade.hype * 0.48 + arcade.health * 0.34 + comboPressure * 0.18;
+
+    if (weighted >= 94 && arcade.combo >= 16) {
+      return "S";
+    }
+    if (weighted >= 84) {
+      return "A";
+    }
+    if (weighted >= 72) {
+      return "B";
+    }
+    if (weighted >= 58) {
+      return "C";
+    }
+    return "D";
+  }
+
+  function finalRankFromResult(accuracy, missedCount, extraCount) {
+    if (accuracy >= 98 && missedCount === 0 && extraCount === 0) {
+      return "SS";
+    }
+    if (accuracy >= 93 && missedCount <= 1 && extraCount <= 1) {
+      return "S";
+    }
+    if (accuracy >= 85) {
+      return "A";
+    }
+    if (accuracy >= 75) {
+      return "B";
+    }
+    if (accuracy >= 60) {
+      return "C";
+    }
+    return "D";
+  }
+
+  function setArcadeBanner(text, tone) {
+    if (!ui.arcadeBanner) {
+      return;
+    }
+    const bannerTone = tone || "neutral";
+    ui.arcadeBanner.textContent = text;
+    ui.arcadeBanner.classList.remove(
+      "banner-neutral",
+      "banner-good",
+      "banner-boost",
+      "banner-bad",
+    );
+    ui.arcadeBanner.classList.add("banner-" + bannerTone);
+  }
+
+  function pulseArcadeShellClass(className, durationMs) {
+    if (!ui.appShell) {
+      return;
+    }
+    const duration = typeof durationMs === "number" ? durationMs : 320;
+    ui.appShell.classList.remove(className);
+    void ui.appShell.offsetWidth;
+    ui.appShell.classList.add(className);
+    setTimeout(function () {
+      ui.appShell.classList.remove(className);
+    }, duration);
+  }
+
+  function setArcadeDangerMode(active) {
+    if (ui.notationPanel) {
+      ui.notationPanel.classList.toggle("danger", !!active);
+    }
+    if (ui.resultsPanel) {
+      ui.resultsPanel.classList.toggle("danger", !!active);
+    }
+  }
+
+  function clearArcadeFx() {
+    if (!ui.arcadeFxLayer) {
+      return;
+    }
+    ui.arcadeFxLayer.innerHTML = "";
+  }
+
+  function spawnArcadeFloat(text, tone, size) {
+    if (!ui.arcadeFxLayer) {
+      return;
+    }
+    const float = document.createElement("span");
+    const colorTone = tone || "good";
+    const sizeClass = size || "md";
+    float.className = "arcade-float tone-" + colorTone + " size-" + sizeClass;
+    float.textContent = text;
+    float.style.left = (18 + Math.random() * 64).toFixed(2) + "%";
+    float.style.top = (34 + Math.random() * 30).toFixed(2) + "%";
+    float.style.setProperty("--drift-x", (Math.random() * 28 - 14).toFixed(1) + "px");
+    ui.arcadeFxLayer.append(float);
+    setTimeout(function () {
+      float.remove();
+    }, 1040);
+  }
+
+  function updateArcadeHud() {
+    const arcade = appState.arcade;
+    const safeHealth = clampPercent(arcade.health);
+    const safeHype = clampPercent(arcade.hype);
+    const rank = arcade.rank || "C";
+
+    if (ui.arcadeScoreValue) {
+      ui.arcadeScoreValue.textContent = formatArcadeScore(arcade.score);
+    }
+    if (ui.arcadeLevelValue) {
+      ui.arcadeLevelValue.textContent = "L" + arcade.currentLevel;
+    }
+    if (ui.arcadeHighScoreValue) {
+      ui.arcadeHighScoreValue.textContent = formatArcadeScore(arcade.bestScore);
+    }
+    if (ui.arcadeComboValue) {
+      ui.arcadeComboValue.textContent = "x" + arcade.combo;
+    }
+    if (ui.arcadeStreakValue) {
+      ui.arcadeStreakValue.textContent = String(arcade.streak);
+    }
+    if (ui.arcadeMultiplierValue) {
+      ui.arcadeMultiplierValue.textContent = "x" + arcade.multiplier;
+    }
+    if (ui.arcadeRankValue) {
+      ui.arcadeRankValue.textContent = rank;
+      ui.arcadeRankValue.setAttribute("data-rank", rank);
+    }
+    if (ui.arcadeSetChainValue) {
+      ui.arcadeSetChainValue.textContent = "x" + arcade.rhythmSetChain;
+    }
+    if (ui.arcadeLivesValue) {
+      ui.arcadeLivesValue.textContent = String(Math.max(0, arcade.lives));
+      ui.arcadeLivesValue.setAttribute("data-empty", arcade.lives <= 0 ? "true" : "false");
+    }
+    if (ui.arcadeHealthFill) {
+      ui.arcadeHealthFill.style.width = safeHealth + "%";
+    }
+    if (ui.arcadeHealthValue) {
+      ui.arcadeHealthValue.textContent = safeHealth + "%";
+    }
+    if (ui.arcadeHypeFill) {
+      ui.arcadeHypeFill.style.width = safeHype + "%";
+    }
+    if (ui.arcadeHypeValue) {
+      ui.arcadeHypeValue.textContent = safeHype + "%";
+    }
+    if (ui.appShell) {
+      ui.appShell.classList.toggle("game-over", !!arcade.gameOver);
+    }
+  }
+
+  function resetArcadeProfileState() {
+    appState.arcade.streamTimers.forEach(function (timeoutId) {
+      clearTimeout(timeoutId);
+    });
+    appState.arcade.streamTimers.clear();
+    appState.arcade.score = 0;
+    appState.arcade.combo = 0;
+    appState.arcade.streak = 0;
+    appState.arcade.bestStreak = 0;
+    appState.arcade.multiplier = 1;
+    appState.arcade.health = 100;
+    appState.arcade.hype = 0;
+    appState.arcade.rank = "C";
+    appState.arcade.perfectHits = 0;
+    appState.arcade.greatHits = 0;
+    appState.arcade.goodHits = 0;
+    appState.arcade.badHits = 0;
+    appState.arcade.missHits = 0;
+    appState.arcade.extraHits = 0;
+    appState.arcade.rhythmSetChain = 0;
+    appState.arcade.bestRhythmSetChain = 0;
+    appState.arcade.lastQualifiedRhythmId = null;
+    appState.arcade.lives = appState.arcade.maxLives;
+    appState.arcade.gameOver = false;
+    appState.arcade.runState = "title";
+    appState.arcade.selectedStartLevel = Number(ui.startLevelSelect?.value || ui.levelSelect?.value || 1);
+    appState.arcade.currentLevel = appState.arcade.selectedStartLevel;
+    appState.arcade.peakLevel = appState.arcade.selectedStartLevel;
+    appState.arcade.strongClearStreak = 0;
+    appState.arcade.rhythmsCleared = 0;
+    appState.arcade.lastClearAccuracy = 0;
+    appState.arcade.fixedTempoBpm = null;
+    appState.arcade.currentTimeSignature = null;
+    appState.arcade.measuresPerLine = 4;
+    appState.arcade.lines = [];
+    appState.arcade.activeLineIndex = 0;
+    appState.arcade.streamPhase = "idle";
+    appState.arcade.activeLineSession = null;
+    appState.arcade.activeLiveFeedback = NOOP_LIVE_FEEDBACK;
+    appState.arcade.latencyCompensationMs = 0;
+    appState.arcade.scrollMetrics = null;
+    appState.arcade.diagnostics = [];
+    appState.arcade.lastGameOverSummary = null;
+    clearArcadeFx();
+    setArcadeDangerMode(false);
+    setArcadeBanner("READY PLAYER ONE", "neutral");
+    updateArcadeHud();
+  }
+
+  function prepareArcadeRunState() {
+    appState.arcade.perfectHits = 0;
+    appState.arcade.greatHits = 0;
+    appState.arcade.goodHits = 0;
+    appState.arcade.badHits = 0;
+    appState.arcade.missHits = 0;
+    appState.arcade.extraHits = 0;
+    clearArcadeFx();
+    setArcadeDangerMode(appState.arcade.health <= 26);
+    updateArcadeHud();
+  }
+
+  function triggerArcadeGameOver() {
+    const arcade = appState.arcade;
+    if (arcade.gameOver) {
+      return;
+    }
+
+    arcade.gameOver = true;
+    arcade.lives = 0;
+    arcade.health = 0;
+    arcade.combo = 0;
+    arcade.streak = 0;
+    arcade.multiplier = 1;
+    arcade.rank = "D";
+    setArcadeDangerMode(true);
+    setArcadeBanner("GAME OVER! PRESS RESTART", "bad");
+    spawnArcadeFloat("GAME OVER", "bad", "lg");
+    pulseArcadeShellClass("arcade-punish", 520);
+    updateArcadeHud();
+
+    if (appState.isSessionActive) {
+      cancelArcadeStream("game-over");
+    }
+  }
+
+  function applyShieldHeal(amount) {
+    const arcade = appState.arcade;
+    if (arcade.gameOver) {
+      return;
+    }
+    arcade.health = clampPercent(arcade.health + amount);
+  }
+
+  function applyShieldDamage(amount) {
+    const arcade = appState.arcade;
+    if (arcade.gameOver) {
+      return { lifeLost: false, gameOver: true };
+    }
+
+    arcade.health -= amount;
+    let lifeLost = false;
+    while (arcade.health <= 0 && !arcade.gameOver) {
+      arcade.lives -= 1;
+      lifeLost = true;
+      if (arcade.lives > 0) {
+        arcade.health += 100;
+        spawnArcadeFloat("SHIELD BREAK", "bad", "md");
+        spawnArcadeFloat("LIFE LOST", "bad", "lg");
+        setArcadeBanner("SHIELD BROKEN! " + arcade.lives + " LIVES LEFT", "bad");
+        if (appState.isSessionActive) {
+          cancelArcadeStream("life-lost");
+        }
+      } else {
+        triggerArcadeGameOver();
+      }
+    }
+
+    if (!arcade.gameOver) {
+      arcade.health = clampPercent(Math.max(0, arcade.health));
+    }
+    return { lifeLost: lifeLost, gameOver: arcade.gameOver };
+  }
+
+  function registerArcadeHit(offsetMs) {
+    const arcade = appState.arcade;
+    if (arcade.gameOver) {
+      return;
+    }
+
+    const abs = Math.abs(offsetMs);
+    let label = "GOOD";
+    let tone = "good";
+    let basePoints = 130;
+    let healthDelta = 1;
+    let hypeDelta = 6;
+    let isComboBreak = false;
+
+    if (abs <= 30) {
+      label = "PERFECT";
+      tone = "boost";
+      basePoints = 320;
+      healthDelta = 3;
+      hypeDelta = 13;
+      arcade.perfectHits += 1;
+    } else if (abs <= 60) {
+      label = "GREAT";
+      tone = "good";
+      basePoints = 220;
+      healthDelta = 2;
+      hypeDelta = 10;
+      arcade.greatHits += 1;
+    } else if (abs <= 100) {
+      label = "GOOD";
+      tone = "good";
+      basePoints = 130;
+      healthDelta = 1;
+      hypeDelta = 6;
+      arcade.goodHits += 1;
+    } else {
+      label = "OFFBEAT";
+      tone = "bad";
+      isComboBreak = true;
+      arcade.badHits += 1;
+    }
+
+    if (isComboBreak) {
+      arcade.combo = 0;
+      arcade.streak = 0;
+      arcade.multiplier = 1;
+      arcade.score = Math.max(0, arcade.score - 90);
+      arcade.hype = clampPercent(arcade.hype - 14);
+      const shieldState = applyShieldDamage(10);
+      if (shieldState.gameOver) {
+        return;
+      }
+      if (!shieldState.lifeLost) {
+        setArcadeBanner("OFFBEAT! COMBO LOST", "bad");
+      }
+      spawnArcadeFloat(label, "bad", "md");
+      pulseArcadeShellClass("arcade-punish", 380);
+    } else {
+      arcade.combo += 1;
+      arcade.streak += 1;
+      arcade.bestStreak = Math.max(arcade.bestStreak, arcade.streak);
+      arcade.multiplier = comboMultiplierFromCount(arcade.combo);
+      const points = Math.round(basePoints * arcade.multiplier);
+      arcade.score += points;
+      applyShieldHeal(healthDelta);
+      arcade.hype = clampPercent(arcade.hype + hypeDelta);
+
+      if (arcade.combo > 0 && arcade.combo % 8 === 0) {
+        setArcadeBanner("COMBO x" + arcade.combo + "!", "boost");
+        spawnArcadeFloat("COMBO x" + arcade.combo, "boost", "lg");
+      } else {
+        setArcadeBanner(label + " +" + points, tone);
+        spawnArcadeFloat(label, tone, abs <= 30 ? "lg" : "md");
+      }
+      pulseArcadeShellClass("arcade-reward", abs <= 30 ? 380 : 240);
+    }
+
+    arcade.rank = liveRankFromArcadeState(arcade);
+    setArcadeDangerMode(arcade.health <= 26);
+    updateArcadeHud();
+  }
+
+  function registerArcadeExtraTap(offsetMs) {
+    const arcade = appState.arcade;
+    if (arcade.gameOver) {
+      return;
+    }
+
+    const offsetLabel = timingWordsFromOffset(offsetMs).replace(" ms", "");
+    arcade.extraHits += 1;
+    arcade.combo = 0;
+    arcade.streak = 0;
+    arcade.multiplier = 1;
+    arcade.score = Math.max(0, arcade.score - 140);
+    arcade.hype = clampPercent(arcade.hype - 18);
+    const shieldState = applyShieldDamage(14);
+    if (shieldState.gameOver) {
+      return;
+    }
+    arcade.rank = liveRankFromArcadeState(arcade);
+
+    if (!shieldState.lifeLost) {
+      setArcadeBanner("EXTRA TAP! " + offsetLabel, "bad");
+    }
+    spawnArcadeFloat("EXTRA", "bad", "md");
+    pulseArcadeShellClass("arcade-punish", 420);
+    setArcadeDangerMode(arcade.health <= 26);
+    updateArcadeHud();
+  }
+
+  function registerArcadeMiss() {
+    const arcade = appState.arcade;
+    if (arcade.gameOver) {
+      return;
+    }
+
+    arcade.missHits += 1;
+    arcade.combo = 0;
+    arcade.streak = 0;
+    arcade.multiplier = 1;
+    arcade.score = Math.max(0, arcade.score - 180);
+    arcade.hype = clampPercent(arcade.hype - 21);
+    const shieldState = applyShieldDamage(18);
+    if (shieldState.gameOver) {
+      return;
+    }
+    arcade.rank = liveRankFromArcadeState(arcade);
+
+    if (!shieldState.lifeLost) {
+      setArcadeBanner("MISS! STREAK RESET", "bad");
+    }
+    spawnArcadeFloat("MISS", "bad", "lg");
+    pulseArcadeShellClass("arcade-punish", 460);
+    setArcadeDangerMode(arcade.health <= 26);
+    updateArcadeHud();
+  }
+
+  function finalizeArcadeSession(summary) {
+    const accuracy = Math.max(0, Math.min(100, Number(summary.accuracy) || 0));
+    const missedCount = Math.max(0, Number(summary.missed) || 0);
+    const extraCount = Math.max(0, Number(summary.extra) || 0);
+    const rhythmId = Number(summary.rhythmId) || 0;
+    const arcade = appState.arcade;
+
+    const precisionBonus = Math.round(Math.max(0, accuracy - 65) * 20);
+    const survivalBonus = Math.round(clampPercent(arcade.health) * 6);
+    const cleanBonus = missedCount === 0 && extraCount === 0 ? 750 : 0;
+    const isStrongClear = accuracy >= 86 && missedCount <= 1 && extraCount <= 1;
+    let rhythmChainBonus = 0;
+    let chainIncreased = false;
+
+    if (isStrongClear) {
+      if (rhythmId > 0 && rhythmId !== arcade.lastQualifiedRhythmId) {
+        arcade.rhythmSetChain += 1;
+        arcade.bestRhythmSetChain = Math.max(arcade.bestRhythmSetChain, arcade.rhythmSetChain);
+        arcade.lastQualifiedRhythmId = rhythmId;
+        chainIncreased = true;
+        rhythmChainBonus = Math.round(Math.max(1, arcade.rhythmSetChain) ** 2 * 180);
+      } else {
+        rhythmChainBonus = Math.round(Math.max(1, arcade.rhythmSetChain) * 75);
+      }
+    } else {
+      arcade.rhythmSetChain = 0;
+      if (accuracy < 70 || missedCount + extraCount >= 3) {
+        arcade.lastQualifiedRhythmId = null;
+      }
+    }
+
+    arcade.score = Math.max(0, arcade.score + precisionBonus + survivalBonus + cleanBonus + rhythmChainBonus);
+    arcade.hype = clampPercent(arcade.hype + Math.round(accuracy / 8));
+    arcade.rank = finalRankFromResult(accuracy, missedCount, extraCount);
+
+    const wasHighScore = arcade.score > arcade.bestScore;
+    if (wasHighScore) {
+      arcade.bestScore = arcade.score;
+      safeStoreArcadeBestScore(arcade.bestScore);
+    }
+
+    const rankTone = arcade.rank === "SS" || arcade.rank === "S" ? "boost" : arcade.rank === "A" || arcade.rank === "B" ? "good" : "bad";
+    if (wasHighScore) {
+      setArcadeBanner("NEW HIGH SCORE!", "boost");
+      spawnArcadeFloat("NEW BEST " + formatArcadeScore(arcade.bestScore), "boost", "lg");
+    } else if (chainIncreased && arcade.rhythmSetChain >= 2) {
+      setArcadeBanner("RHYTHM CHAIN x" + arcade.rhythmSetChain, "boost");
+    } else {
+      setArcadeBanner("RANK " + arcade.rank + " CLEAR", rankTone);
+    }
+    spawnArcadeFloat("RANK " + arcade.rank, rankTone, "lg");
+    if (chainIncreased && arcade.rhythmSetChain >= 2) {
+      spawnArcadeFloat("CHAIN BONUS +" + formatArcadeScore(rhythmChainBonus), "boost", "md");
+    }
+    if (cleanBonus > 0) {
+      spawnArcadeFloat("FULL COMBO BONUS", "boost", "md");
+    }
+    pulseArcadeShellClass(
+      arcade.rank === "SS" || arcade.rank === "S" ? "arcade-mega" : "arcade-reward",
+      520,
+    );
+    updateArcadeHud();
+
+    return {
+      rank: arcade.rank,
+      finalScore: arcade.score,
+      bestStreak: arcade.bestStreak,
+      wasHighScore: wasHighScore,
+      highScore: arcade.bestScore,
+      rhythmSetChain: arcade.rhythmSetChain,
+      chainBonus: rhythmChainBonus,
+    };
+  }
+
+  function appendArcadeSummaryCards(summaryCardsEl, arcadeSummary) {
+    if (!summaryCardsEl) {
+      return;
+    }
+
+    const cards = [
+      { label: "Arcade Rank", value: arcadeSummary.rank },
+      { label: "Final Score", value: formatArcadeScore(arcadeSummary.finalScore) },
+      { label: "Best Streak", value: String(arcadeSummary.bestStreak) },
+      { label: "Set Chain", value: "x" + arcadeSummary.rhythmSetChain },
+      {
+        label: "High Score",
+        value: formatArcadeScore(arcadeSummary.highScore) + (arcadeSummary.wasHighScore ? " NEW!" : ""),
+      },
+    ];
+
+    cards.forEach(function (card) {
+      const block = document.createElement("article");
+      block.className = "summary-card arcade-summary-card";
+      if (card.label === "Arcade Rank") {
+        block.setAttribute("data-rank", card.value);
+      }
+      block.innerHTML = "<h3>" + card.label + "</h3><strong>" + card.value + "</strong>";
+      summaryCardsEl.append(block);
+    });
   }
 
   function formatSessionLogTime(timestampMs) {
@@ -2210,14 +3308,554 @@
     };
   }
 
+  function syncSelectedLevel(levelId) {
+    const safeLevel = Math.max(1, Math.min(5, Number(levelId) || 1));
+    if (ui.levelSelect) {
+      ui.levelSelect.value = String(safeLevel);
+    }
+    if (ui.startLevelSelect) {
+      ui.startLevelSelect.value = String(safeLevel);
+    }
+    appState.arcade.selectedStartLevel = safeLevel;
+    return safeLevel;
+  }
+
+  function setArcadeOverlayMode(mode, options) {
+    if (!ui.arcadeOverlay) {
+      return;
+    }
+
+    const config = options || {};
+    const safeMode = mode || "hidden";
+    ui.arcadeOverlay.hidden = safeMode === "hidden";
+    ui.arcadeOverlay.setAttribute("data-mode", safeMode);
+
+    if (safeMode === "hidden") {
+      return;
+    }
+
+    if (ui.overlayEyebrow) {
+      ui.overlayEyebrow.textContent = config.eyebrow || "Arcade Mode";
+    }
+    if (ui.overlayTitle) {
+      ui.overlayTitle.textContent = config.title || "Rhythm Rush";
+    }
+    if (ui.overlayText) {
+      ui.overlayText.textContent = config.text || "";
+    }
+    if (ui.overlayLevelGroup) {
+      ui.overlayLevelGroup.hidden = !config.showLevelSelect;
+    }
+    if (ui.overlayTempoGroup) {
+      ui.overlayTempoGroup.hidden = !config.showTempoSelect;
+    }
+    if (ui.overlayPrimaryBtn) {
+      ui.overlayPrimaryBtn.textContent = config.buttonText || "Start Run (Return)";
+      ui.overlayPrimaryBtn.focus();
+    }
+  }
+
+  function hideGameOverModal() {
+    if (ui.gameOverModal) {
+      ui.gameOverModal.hidden = true;
+    }
+  }
+
+  function showGameOverModal(summary) {
+    if (!ui.gameOverModal) {
+      return;
+    }
+    ui.gameOverModal.hidden = false;
+    if (ui.gameOverTitle) {
+      ui.gameOverTitle.textContent = "Game Over";
+    }
+    if (ui.gameOverScoreValue) {
+      ui.gameOverScoreValue.textContent = formatArcadeScore(summary.finalScore);
+    }
+    if (ui.gameOverRhythmsValue) {
+      ui.gameOverRhythmsValue.textContent = String(summary.rhythmsCleared);
+    }
+    if (ui.gameOverPeakLevelValue) {
+      ui.gameOverPeakLevelValue.textContent = "L" + summary.peakLevel;
+    }
+    if (ui.gameOverBestComboValue) {
+      ui.gameOverBestComboValue.textContent = String(summary.bestCombo);
+    }
+    if (ui.gameOverBestChainValue) {
+      ui.gameOverBestChainValue.textContent = "x" + summary.bestChain;
+    }
+    if (ui.playAgainBtn) {
+      ui.playAgainBtn.focus();
+    }
+  }
+
+  function openTitleScreen() {
+    clearArcadeStreamTimers();
+    appState.arcade.streamPhase = "idle";
+    appState.arcade.activeLineSession = null;
+    appState.arcade.activeLiveFeedback = NOOP_LIVE_FEEDBACK;
+    appState.arcade.scrollMetrics = null;
+    appState.arcade.runState = "title";
+    syncSelectedLevel(appState.arcade.selectedStartLevel || 1);
+    setStatus("Title Screen");
+    setBeatIndicator(false, "Ready");
+    setTapStatus("Choose a starting level and begin a new run.");
+    resetLiveTimingFeedback("Press Return to start");
+    if (ui.notationContainer) {
+      ui.notationContainer.classList.remove("is-arcade-score", "stream-shift");
+      ui.notationContainer.style.height = "";
+      ui.notationContainer.innerHTML = "";
+    }
+    hideGameOverModal();
+    setArcadeOverlayMode("title", {
+      eyebrow: "Arcade Mode",
+      title: "Rhythm Rush",
+      text:
+        "Choose a starting level and tempo, then survive the endless rhythm stream. Strong clears level you up over time.",
+      buttonText: "Start Run (Return)",
+      showLevelSelect: true,
+      showTempoSelect: true,
+    });
+  }
+
+  function buildGameOverSummary() {
+    return {
+      finalScore: appState.arcade.score,
+      rhythmsCleared: appState.arcade.rhythmsCleared,
+      peakLevel: appState.arcade.peakLevel,
+      bestCombo: appState.arcade.bestStreak,
+      bestChain: appState.arcade.bestRhythmSetChain,
+    };
+  }
+
+  function getArcadeMeasuresPerLine(levelId, timeSignature) {
+    const width =
+      ui.notationPanel?.clientWidth || ui.notationContainer?.clientWidth || window.innerWidth || 1280;
+    const safeLevel = Math.max(1, Math.min(5, Number(levelId) || appState.arcade.currentLevel || 1));
+    const signatureKey = timeSignatureToString(timeSignature);
+    let measures = width >= 1220 ? 4 : width >= 900 ? 3 : 2;
+
+    if (safeLevel >= 5) {
+      measures = Math.min(measures, 3);
+    }
+
+    if (signatureKey === "5/4") {
+      measures = Math.min(measures, 2);
+    } else if (signatureKey === "7/8") {
+      measures = Math.min(measures, width >= 1160 ? 3 : 2);
+    } else if (safeLevel >= 5 && signatureKey === "4/4") {
+      measures = Math.min(measures, width >= 1160 ? 3 : 2);
+    }
+
+    return Math.max(2, measures);
+  }
+
+  function createArcadeExercise(levelId, options) {
+    const config = options || {};
+    const safeLevel = Math.max(1, Math.min(5, Number(levelId) || 1));
+    const levelConfig = getLevelConfig(safeLevel);
+    const timeSignature = cloneTimeSignature(config.timeSignature || appState.arcade.currentTimeSignature);
+    const preferredMeasuresPerExercise = Math.max(
+      1,
+      Number(config.measuresPerExercise) || getArcadeMeasuresPerLine(safeLevel, timeSignature),
+    );
+    let lastError = null;
+
+    for (let measuresPerExercise = preferredMeasuresPerExercise; measuresPerExercise >= 1; measuresPerExercise -= 1) {
+      try {
+        const exercise = createValidatedExercise(levelConfig, {
+          tempoBpm: appState.arcade.fixedTempoBpm,
+          measuresPerExercise: measuresPerExercise,
+          timeSignature: timeSignature,
+        });
+        exercise.level = safeLevel;
+        if (measuresPerExercise !== preferredMeasuresPerExercise) {
+          recordArcadeDiagnostic("line-density-fallback", {
+            level: safeLevel,
+            timeSignature: timeSignatureToString(timeSignature),
+            preferredMeasuresPerExercise: preferredMeasuresPerExercise,
+            actualMeasuresPerExercise: measuresPerExercise,
+          });
+        }
+        return exercise;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    throw lastError || new Error("Failed to create arcade exercise.");
+  }
+
+  function regenerateArcadeLine(lineRef) {
+    if (!lineRef || !lineRef.exercise) {
+      return false;
+    }
+
+    const safeLevel = Math.max(1, Math.min(5, Number(lineRef.exercise.level) || appState.arcade.currentLevel || 1));
+    recordArcadeDiagnostic("line-regenerate", {
+      level: safeLevel,
+      previousExercise: summarizeExerciseForDiagnostics(lineRef.exercise),
+    });
+    lineRef.exercise = createArcadeExercise(safeLevel, {
+      measuresPerExercise: lineRef.exercise.measuresPerExercise,
+      timeSignature: cloneTimeSignature(lineRef.exercise.timeSignature),
+    });
+    lineRef.analysisRows = [];
+    return true;
+  }
+
+  function syncReadoutsForExercise(exercise) {
+    if (!exercise) {
+      return;
+    }
+    appState.exercise = exercise;
+    if (ui.timeSignatureValue) {
+      ui.timeSignatureValue.textContent = exercise.timeSignature.num + "/" + exercise.timeSignature.den;
+    }
+    syncTempoControls(exercise.tempoBpm);
+  }
+
+  function buildArcadeLine(levelId, options) {
+    return {
+      id: ++appState.rhythmIdCounter,
+      exercise: createArcadeExercise(levelId, options),
+      analysisRows: [],
+    };
+  }
+
+  function ensureArcadePreviewLines() {
+    while (appState.arcade.lines.length < 4) {
+      appState.arcade.lines.push(
+        buildArcadeLine(appState.arcade.currentLevel, {
+          timeSignature: cloneTimeSignature(appState.arcade.currentTimeSignature),
+        }),
+      );
+    }
+  }
+
+  function buildVisibleArcadeLineEntries() {
+    const lines = appState.arcade.lines;
+    if (!lines.length) {
+      return [];
+    }
+
+    return lines.slice(0, 4).map(function (line, visibleIndex) {
+      return {
+        role: visibleIndex === 0 ? "current" : "next",
+        exercise: line.exercise,
+        analysisRows: [],
+        lineRef: line,
+      };
+    });
+  }
+
+  function resetArcadeStreamScroll() {
+    const svg = ui.notationContainer?.querySelector("svg");
+    if (!svg) {
+      return;
+    }
+    svg.style.transform = "translateY(0px)";
+  }
+
+  function getArcadeScrollMetrics(exercise, systemHeight) {
+    const safeSystemHeight = Math.max(1, Number(systemHeight) || 194);
+    const safeExercise = exercise || null;
+    const measuresPerLine = Math.max(
+      1,
+      Number(safeExercise?.measuresPerExercise) || appState.arcade.measuresPerLine || 1,
+    );
+    const beatGroupsPerMeasure = Math.max(
+      1,
+      Array.isArray(getBeatGroupTicks(safeExercise?.timeSignature || parseTimeSignature("4/4")))
+        ? getBeatGroupTicks(safeExercise?.timeSignature || parseTimeSignature("4/4")).length
+        : 1,
+    );
+    const totalBeatGroups = Math.max(1, measuresPerLine * beatGroupsPerMeasure);
+    const scrollingBeatGroups = Math.min(
+      totalBeatGroups - 0.25,
+      totalBeatGroups >= 10 ? 1.75 : totalBeatGroups >= 6 ? 1.4 : 1.15,
+    );
+    const scrollStartProgress =
+      totalBeatGroups <= 1
+        ? 0.88
+        : Math.max(0.78, 1 - scrollingBeatGroups / totalBeatGroups);
+
+    return {
+      maxOffsetPx: Math.round(safeSystemHeight * 0.84),
+      scrollStartProgress: scrollStartProgress,
+    };
+  }
+
+  function updateArcadeStreamScroll(elapsedMs, totalDurationMs) {
+    const svg = ui.notationContainer?.querySelector("svg");
+    const metrics = appState.arcade.scrollMetrics;
+    if (!svg || !metrics) {
+      return;
+    }
+
+    const safeTotalMs = Math.max(1, totalDurationMs || 1);
+    const progress = Math.max(0, Math.min(1, elapsedMs / safeTotalMs));
+    const startProgress = metrics.scrollStartProgress;
+    const maxOffsetPx = metrics.maxOffsetPx;
+    let offsetPx = 0;
+
+    if (progress > startProgress) {
+      const normalized = Math.max(
+        0,
+        Math.min(1, (progress - startProgress) / Math.max(0.001, 1 - startProgress)),
+      );
+      const eased = normalized * normalized * (3 - 2 * normalized);
+      offsetPx = -maxOffsetPx * eased;
+    }
+
+    svg.style.transform = "translateY(" + offsetPx.toFixed(2) + "px)";
+  }
+
+  function renderArcadeStream(animateShift) {
+    if (!ui.notationContainer) {
+      return NOOP_LIVE_FEEDBACK;
+    }
+
+    let VF;
+    try {
+      VF = assertVexFlow();
+    } catch (error) {
+      renderFallback(ui.notationContainer, error.message);
+      return NOOP_LIVE_FEEDBACK;
+    }
+
+    for (let renderAttempt = 0; renderAttempt < 3; renderAttempt += 1) {
+      const entries = buildVisibleArcadeLineEntries();
+      if (!entries.length) {
+        appState.arcade.scrollMetrics = null;
+        ui.notationContainer.style.height = "";
+        ui.notationContainer.innerHTML = "";
+        return NOOP_LIVE_FEEDBACK;
+      }
+
+      try {
+        entries.forEach(function (entry) {
+          validateExerciseForDisplay(entry.exercise);
+        });
+
+        ui.notationContainer.classList.add("is-arcade-score");
+        ui.notationContainer.classList.remove("stream-shift");
+        ui.notationContainer.innerHTML = "";
+        const width = Math.max(780, ui.notationContainer.clientWidth || 780);
+        const systemHeight = 194;
+        const viewportLineCount = Math.min(3, entries.length);
+        const height = 26 + entries.length * systemHeight + 26;
+        const viewportHeight = 26 + viewportLineCount * systemHeight + 26;
+        ui.notationContainer.style.height = viewportHeight + "px";
+        appState.arcade.scrollMetrics = getArcadeScrollMetrics(entries[0]?.exercise || null, systemHeight);
+        const renderer = new VF.Renderer(ui.notationContainer, VF.Renderer.Backends.SVG);
+        renderer.resize(width, height);
+        const context = renderer.getContext();
+        const svg = ui.notationContainer.querySelector("svg");
+        if (svg) {
+          svg.style.willChange = "transform";
+        }
+        const svgNs = "http://www.w3.org/2000/svg";
+        const renderedLines = [];
+        let failedEntry = null;
+
+        for (let visibleIndex = 0; visibleIndex < entries.length; visibleIndex += 1) {
+          const entry = entries[visibleIndex];
+          failedEntry = entry;
+          const topY = 26 + visibleIndex * systemHeight;
+          const paper = document.createElementNS(svgNs, "rect");
+          paper.setAttribute("x", "10");
+          paper.setAttribute("y", String(topY - 10));
+          paper.setAttribute("width", String(width - 20));
+          paper.setAttribute("height", "164");
+          paper.setAttribute("rx", "16");
+          paper.setAttribute(
+            "fill",
+            entry.role === "current"
+              ? "rgba(255,255,255,0.99)"
+              : entry.role === "past"
+                ? "rgba(248,252,255,0.93)"
+                : "rgba(249,252,255,0.96)",
+          );
+          paper.setAttribute(
+            "stroke",
+            entry.role === "current" ? "rgba(89,231,165,0.55)" : "rgba(138,176,230,0.28)",
+          );
+          paper.setAttribute("stroke-width", entry.role === "current" ? "2" : "1.2");
+          svg.append(paper);
+
+          const system = drawExerciseSystem({
+            VF: VF,
+            context: context,
+            exercise: entry.exercise,
+            topY: topY,
+            width: width,
+            showTimeSignature: true,
+          });
+
+          renderedLines.push({
+            role: entry.role,
+            lineRef: entry.lineRef,
+            exercise: entry.exercise,
+            onsetAnchors: system.onsetAnchors,
+            timelineBounds: system.timelineBounds,
+          });
+
+          if (entry.analysisRows && entry.analysisRows.length) {
+            drawNotationAnalysisRowsOnSvg(
+              svg,
+              system.onsetAnchors,
+              entry.exercise.expectedOnsetsMs,
+              entry.exercise.totalDurationMs,
+              system.timelineBounds,
+              entry.analysisRows,
+            );
+          }
+        }
+
+        const activeLine = appState.arcade.lines[appState.arcade.activeLineIndex];
+        const activeRenderedLine = renderedLines.find(function (line) {
+          return line.lineRef === activeLine;
+        });
+        if (!activeRenderedLine) {
+          return NOOP_LIVE_FEEDBACK;
+        }
+
+        const liveFeedback = createLiveNoteFeedbackLayer(
+          ui.notationContainer,
+          activeRenderedLine.onsetAnchors,
+          activeRenderedLine.exercise.expectedOnsetsMs,
+          activeRenderedLine.exercise.totalDurationMs,
+          activeRenderedLine.timelineBounds,
+          {
+            onProgress: updateArcadeStreamScroll,
+          },
+        );
+        resetArcadeStreamScroll();
+        return liveFeedback;
+      } catch (error) {
+        ui.notationContainer.innerHTML = "";
+        const fallbackEntry = entries[0];
+        const targetEntry = failedEntry || fallbackEntry;
+        recordArcadeDiagnostic("stream-render-failed", {
+          error: error.message,
+          failedExercise: summarizeExerciseForDiagnostics(targetEntry?.exercise || null),
+          visibleExercises: entries.map(function (entry) {
+            return summarizeExerciseForDiagnostics(entry.exercise);
+          }),
+        });
+        try {
+          if (targetEntry && regenerateArcadeLine(targetEntry.lineRef)) {
+            continue;
+          }
+        } catch (regenError) {
+          recordArcadeDiagnostic("stream-regenerate-threw", {
+            error: regenError.message,
+            failedExercise: summarizeExerciseForDiagnostics(targetEntry?.exercise || null),
+          });
+          error = regenError;
+        }
+        renderFallback(ui.notationContainer, "Stream regeneration failed: " + error.message);
+        setArcadeBanner("STREAM REGEN FAILED", "bad");
+        pauseArcadeForRenderFailure("The notation stream failed to regenerate cleanly.");
+        return NOOP_LIVE_FEEDBACK;
+      }
+    }
+
+    renderFallback(ui.notationContainer, "Stream regeneration exceeded retry limit.");
+    setArcadeBanner("STREAM REGEN FAILED", "bad");
+    pauseArcadeForRenderFailure("The notation stream exceeded its retry limit.");
+    return NOOP_LIVE_FEEDBACK;
+  }
+
+  function setupArcadeLineQueue() {
+    appState.arcade.activeLineIndex = 0;
+    const allowedTimeSignatures = getLevelConfig(appState.arcade.currentLevel).allowedTimeSignatures;
+    const currentSignatureKey = timeSignatureToString(appState.arcade.currentTimeSignature);
+    if (!currentSignatureKey || !allowedTimeSignatures.includes(currentSignatureKey)) {
+      appState.arcade.currentTimeSignature = getArcadeOpeningTimeSignature(appState.arcade.currentLevel);
+    }
+    appState.arcade.measuresPerLine = getArcadeMeasuresPerLine(
+      appState.arcade.currentLevel,
+      appState.arcade.currentTimeSignature,
+    );
+    appState.arcade.lines = [
+      buildArcadeLine(appState.arcade.currentLevel, {
+        measuresPerExercise: appState.arcade.measuresPerLine,
+        timeSignature: cloneTimeSignature(appState.arcade.currentTimeSignature),
+      }),
+    ];
+    ensureArcadePreviewLines();
+    syncReadoutsForExercise(appState.arcade.lines[0].exercise);
+    appState.arcade.activeLiveFeedback = renderArcadeStream(false);
+  }
+
+  function advanceArcadeDifficulty(result) {
+    const strongClear = result.overallAccuracy >= 88 && result.missedCount <= 1 && result.extraTapCount <= 1;
+    appState.arcade.lastClearAccuracy = result.overallAccuracy;
+    if (!strongClear) {
+      appState.arcade.strongClearStreak = 0;
+      return;
+    }
+
+    appState.arcade.strongClearStreak += 1;
+    if (appState.arcade.strongClearStreak >= 2 && appState.arcade.currentLevel < 5) {
+      appState.arcade.currentLevel += 1;
+      appState.arcade.peakLevel = Math.max(appState.arcade.peakLevel, appState.arcade.currentLevel);
+      appState.arcade.strongClearStreak = 0;
+      setArcadeBanner("LEVEL UP! NOW L" + appState.arcade.currentLevel, "boost");
+      spawnArcadeFloat("LEVEL " + appState.arcade.currentLevel, "boost", "lg");
+    }
+  }
+
+  function finalizeRhythmClear(line, tapsMs, result) {
+    const exercise = line.exercise;
+    appState.arcade.rhythmsCleared += 1;
+    const arcadeSummary = finalizeArcadeSession({
+      accuracy: result.overallAccuracy,
+      missed: result.missedCount,
+      extra: result.extraTapCount,
+      rhythmId: line.id,
+    });
+    advanceArcadeDifficulty(result);
+    maybeAdvanceArcadeTimeSignature(result);
+
+    line.analysisRows = [buildNotationAnalysisRow("Clear", exercise.expectedOnsetsMs, tapsMs, result)];
+    appState.arcade.activeLineIndex = 1;
+    ensureArcadePreviewLines();
+    appState.arcade.lines = appState.arcade.lines.slice(1);
+    appState.arcade.activeLineIndex = 0;
+    ensureArcadePreviewLines();
+    const currentLine = appState.arcade.lines[0];
+    if (currentLine) {
+      syncReadoutsForExercise(currentLine.exercise);
+    }
+    updateArcadeHud();
+    appState.arcade.activeLiveFeedback = renderArcadeStream(false);
+    setTapStatus(
+      "Lines cleared: " +
+        appState.arcade.rhythmsCleared +
+        ". Accuracy " +
+        result.overallAccuracy +
+        "%. Score " +
+        formatArcadeScore(arcadeSummary.finalScore) +
+        ".",
+    );
+  }
+
   function populateLevelSelector() {
     listLevelIds().forEach(function (levelId) {
-      const option = document.createElement("option");
-      option.value = String(levelId);
-      option.textContent = "Level " + levelId;
-      ui.levelSelect.append(option);
+      [ui.levelSelect, ui.startLevelSelect].forEach(function (selectEl) {
+        if (!selectEl) {
+          return;
+        }
+        const option = document.createElement("option");
+        option.value = String(levelId);
+        option.textContent = "Level " + levelId;
+        selectEl.append(option);
+      });
     });
-    ui.levelSelect.value = "1";
+    syncSelectedLevel(1);
   }
 
   function currentLevelConfig() {
@@ -2243,6 +3881,9 @@
 
     ui.timeSignatureValue.textContent = exercise.timeSignature.num + "/" + exercise.timeSignature.den;
     syncTempoControls(exercise.tempoBpm);
+    ui.notationContainer.classList.remove("is-arcade-score", "stream-shift");
+    ui.notationContainer.style.height = "";
+    appState.arcade.scrollMetrics = null;
     renderNotation(ui.notationContainer, exercise, []);
   }
 
@@ -2250,6 +3891,11 @@
     const tempo = clampTempo(tempoBpm);
     appState.selectedTempoBpm = tempo;
     syncTempoControls(tempo);
+
+    if (appState.isSessionActive && source === "user") {
+      setTapStatus("Tempo locked during live play. The new tempo will apply to the next run.");
+      return;
+    }
 
     if (!appState.exercise) {
       return;
@@ -2270,10 +3916,18 @@
     if (appState.isSessionActive) {
       return;
     }
+    if (appState.arcade.gameOver) {
+      setArcadeBanner("GAME OVER! PRESS RESTART", "bad");
+      setPostRunActionsMode("gameover");
+      return;
+    }
+    setPostRunActionsMode("hidden");
 
     const levelConfig = currentLevelConfig();
     try {
-      appState.exercise = generateExercise(levelConfig);
+      appState.exercise = createValidatedExercise(levelConfig);
+      appState.rhythmIdCounter += 1;
+      appState.currentRhythmId = appState.rhythmIdCounter;
     } catch (error) {
       appState.exercise = null;
       resetResults();
@@ -2282,6 +3936,7 @@
       setBeatIndicator(false, "Error");
       setTapStatus("Generation failed: " + error.message);
       resetLiveTimingFeedback("No exercise loaded");
+      setArcadeBanner("CHART LOAD FAILED", "bad");
       return;
     }
 
@@ -2296,10 +3951,11 @@
     setBeatIndicator(false, "Ready");
     setTapStatus("Expected notes to hit: " + appState.exercise.expectedOnsetsMs.length);
     resetLiveTimingFeedback();
+    setArcadeBanner("NEW CHART READY", "good");
   }
 
   function showLoopDetail(loopIndex) {
-    if (!appState.loopResults.length) {
+    if (!appState.loopResults.length || !ui.feedbackTableBody) {
       return;
     }
     const safeIndex = Math.max(0, Math.min(appState.loopResults.length - 1, loopIndex));
@@ -2307,7 +3963,9 @@
     const tapsMs = appState.loopTapSets[safeIndex];
 
     renderAttemptTable(ui.feedbackTableBody, appState.exercise.expectedOnsetsMs, tapsMs, result);
-    ui.timelineStrip.innerHTML = "";
+    if (ui.timelineStrip) {
+      ui.timelineStrip.innerHTML = "";
+    }
     setTapStatus("Showing loop " + (safeIndex + 1) + " detail. Taps: " + tapsMs.length);
   }
 
@@ -2322,8 +3980,597 @@
     }
   }
 
+  function handleNextRhythmAction() {
+    if (appState.isSessionActive || appState.arcade.gameOver) {
+      return;
+    }
+    generateNewExercise();
+  }
+
+  function handleRetryRhythmAction() {
+    if (appState.isSessionActive || appState.arcade.gameOver || !appState.exercise) {
+      return;
+    }
+    runSession(appState.lastSessionLoops || 1);
+  }
+
+  function handleRestartArcadeAction() {
+    if (appState.isSessionActive) {
+      return;
+    }
+    resetArcadeProfileState();
+    hideGameOverModal();
+    openTitleScreen();
+  }
+
+  function handleOverlayPrimaryAction() {
+    if (appState.isSessionActive) {
+      return;
+    }
+
+    if (appState.arcade.runState === "paused") {
+      startArcadeRun({ continueExisting: true });
+      return;
+    }
+
+    startArcadeRun({ continueExisting: false });
+  }
+
+  function handlePlayAgainAction() {
+    if (appState.isSessionActive) {
+      return;
+    }
+    resetArcadeProfileState();
+    hideGameOverModal();
+    openTitleScreen();
+  }
+
+  function scheduleArcadeTimeout(msFromNow, fn, label) {
+    const timeoutId = setTimeout(function () {
+      appState.arcade.streamTimers.delete(timeoutId);
+      try {
+        fn();
+      } catch (error) {
+        handleArcadeRuntimeError(error, {
+          label: label || "timer",
+        });
+      }
+    }, Math.max(0, msFromNow));
+    appState.arcade.streamTimers.add(timeoutId);
+    return timeoutId;
+  }
+
+  function scheduleArcadeAt(targetTimeMs, fn, label) {
+    return scheduleArcadeTimeout(targetTimeMs - performance.now(), fn, label);
+  }
+
+  function waitForAnimationFrames(frameCount) {
+    const safeFrameCount = Math.max(1, Number(frameCount) || 1);
+    return new Promise(function (resolve) {
+      let remaining = safeFrameCount;
+      const step = function () {
+        remaining -= 1;
+        if (remaining <= 0) {
+          resolve();
+          return;
+        }
+        requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+    });
+  }
+
+  function getBeatDurationsMs(timeSignature, tempoBpm) {
+    const safeTempo = clampTempo(tempoBpm);
+    const msPerTick = (60000 / safeTempo) / PPQ;
+    return getBeatGroupTicks(timeSignature).map(function (tickCount) {
+      return tickCount * msPerTick;
+    });
+  }
+
+  function clearArcadeStreamTimers() {
+    appState.arcade.streamTimers.forEach(function (timeoutId) {
+      clearTimeout(timeoutId);
+    });
+    appState.arcade.streamTimers.clear();
+  }
+
+  function getActiveArcadeLine() {
+    return appState.arcade.lines[appState.arcade.activeLineIndex] || null;
+  }
+
+  function scheduleArcadeBeatSeries(startTimeMs, exercise, phase) {
+    if (!exercise || !exercise.timeSignature || !exercise.tempoBpm) {
+      return;
+    }
+
+    const beatDurationsMs = getBeatDurationsMs(exercise.timeSignature, exercise.tempoBpm);
+    const beatsPerMeasure = Math.max(1, beatDurationsMs.length);
+    const measuresPerExercise = Math.max(1, Number(exercise.measuresPerExercise) || 1);
+    const measureDurationMs = beatDurationsMs.reduce(function (sum, durationMs) {
+      return sum + durationMs;
+    }, 0);
+
+    for (let measureIndex = 0; measureIndex < measuresPerExercise; measureIndex += 1) {
+      let beatCursorMs = 0;
+      for (let beatIndex = 0; beatIndex < beatsPerMeasure; beatIndex += 1) {
+        const targetTimeMs = startTimeMs + measureIndex * measureDurationMs + beatCursorMs;
+        const beatInMeasure = beatIndex + 1;
+        scheduleArcadeAt(targetTimeMs, function () {
+          if (!appState.isSessionActive || appState.arcade.runState !== "active") {
+            return;
+          }
+
+          const activeSession = appState.arcade.activeLineSession;
+          const isCurrentLineBeat =
+            phase === "performing" &&
+            activeSession &&
+            activeSession.lineStartTimeMs === startTimeMs;
+          const isCountInBeat = phase === "count-in" && appState.arcade.streamPhase === "count-in";
+          if (!isCurrentLineBeat && !isCountInBeat) {
+            return;
+          }
+
+          metronome.tick(beatInMeasure === 1);
+          setBeatIndicator(
+            true,
+            (phase === "count-in" ? "Count-in" : "Live") + ": beat " + beatInMeasure,
+          );
+        }, phase + "-beat-" + measureIndex + "-" + beatInMeasure);
+        beatCursorMs += beatDurationsMs[beatIndex];
+      }
+    }
+  }
+
+  function getCountInExerciseForLine(line) {
+    if (!line || !line.exercise) {
+      return null;
+    }
+
+    const measureDurationMs =
+      getMeasureTicks(line.exercise.timeSignature) * ((60000 / line.exercise.tempoBpm) / PPQ);
+
+    return {
+      timeSignature: { ...line.exercise.timeSignature },
+      tempoBpm: line.exercise.tempoBpm,
+      measuresPerExercise: 1,
+      totalDurationMs: measureDurationMs,
+    };
+  }
+
+  function pauseArcadeForRenderFailure(message) {
+    recordArcadeDiagnostic("stream-paused", {
+      reason: message,
+      activeLine: summarizeExerciseForDiagnostics(getActiveArcadeLine()?.exercise || null),
+    });
+    clearArcadeStreamTimers();
+    appState.arcade.activeLiveFeedback.stopPlayhead();
+    appState.arcade.streamPhase = "idle";
+    appState.arcade.activeLineSession = null;
+    appState.isSessionActive = false;
+    appState.arcade.runState = "paused";
+    setButtonsDisabled(false);
+    setStatus("Render Error");
+    setBeatIndicator(false, "Error");
+    setTapStatus(message);
+    resetLiveTimingFeedback("Render error");
+    setArcadeBanner("STREAM ERROR", "bad");
+    setArcadeOverlayMode("paused", {
+      eyebrow: "Render Error",
+      title: "Stream Interrupted",
+      text: message + " Press Return to regenerate and continue.",
+      buttonText: "Continue Run (Return)",
+      showLevelSelect: false,
+      showTempoSelect: false,
+    });
+  }
+
+  function scheduleActiveArcadeLineMisses(session) {
+    const exercise = session.line.exercise;
+    exercise.expectedOnsetsMs.forEach(function (expectedMs, expectedIndex) {
+      const targetTimeMs =
+        session.lineStartTimeMs +
+        expectedMs +
+        getMissCheckDelayMs(exercise.expectedOnsetsMs, expectedIndex);
+      scheduleArcadeAt(targetTimeMs, function () {
+        if (
+          !appState.isSessionActive ||
+          appState.arcade.streamPhase !== "performing" ||
+          appState.arcade.activeLineSession !== session ||
+          session.resolvedExpectedIndices.has(expectedIndex)
+        ) {
+          return;
+        }
+        session.resolvedExpectedIndices.add(expectedIndex);
+        appState.arcade.activeLiveFeedback.flashMiss(expectedIndex);
+        registerArcadeMiss();
+      }, "miss-check-" + expectedIndex);
+    });
+  }
+
+  function beginActiveArcadeLine(startTimeMs) {
+    if (!appState.isSessionActive || appState.arcade.runState !== "active") {
+      return;
+    }
+
+    const line = getActiveArcadeLine();
+    if (!line) {
+      return;
+    }
+
+    syncReadoutsForExercise(line.exercise);
+    if (!appState.arcade.activeLiveFeedback || appState.arcade.activeLiveFeedback === NOOP_LIVE_FEEDBACK) {
+      appState.arcade.activeLiveFeedback = renderArcadeStream(false);
+    }
+    appState.arcade.activeLiveFeedback.clear();
+
+    const session = {
+      line: line,
+      lineStartTimeMs: typeof startTimeMs === "number" ? startTimeMs : performance.now(),
+      tapsMs: [],
+      totalTapCount: 0,
+      resolvedExpectedIndices: new Set(),
+    };
+    appState.arcade.activeLineSession = session;
+    appState.arcade.streamPhase = "performing";
+    appState.arcade.activeLiveFeedback.startPlayhead(
+      line.exercise.totalDurationMs,
+      session.lineStartTimeMs,
+    );
+    scheduleArcadeBeatSeries(session.lineStartTimeMs, line.exercise, "performing");
+    scheduleActiveArcadeLineMisses(session);
+
+    setStatus("Live");
+    setBeatIndicator(true, "Play");
+    resetLiveTimingFeedback("Line active");
+    setTapStatus("Keep the stream moving. The next line is already coming.");
+    setArcadeBanner("LINE " + (appState.arcade.rhythmsCleared + 1), "neutral");
+
+    const lineEndTimeMs = session.lineStartTimeMs + line.exercise.totalDurationMs;
+    scheduleArcadeAt(lineEndTimeMs, function () {
+      if (
+        !appState.isSessionActive ||
+        appState.arcade.runState !== "active" ||
+        appState.arcade.activeLineSession !== session
+      ) {
+        return;
+      }
+
+      appState.arcade.activeLiveFeedback.stopPlayhead();
+      const result = gradeAttempt(line.exercise.expectedOnsetsMs, session.tapsMs);
+      finalizeRhythmClear(line, session.tapsMs, result);
+      addSessionLogEntry({
+        attemptNumber: appState.nextAttemptNumber++,
+        level: line.exercise.level,
+        loops: 1,
+        tempoBpm: line.exercise.tempoBpm,
+        accuracy: result.overallAccuracy,
+        taps: session.totalTapCount,
+        missed: result.missedCount,
+        extra: result.extraTapCount,
+        status: "completed",
+      });
+      appState.arcade.activeLineSession = null;
+
+      if (appState.arcade.runState === "active" && !appState.arcade.gameOver) {
+        beginActiveArcadeLine(lineEndTimeMs);
+      }
+    }, "line-end");
+  }
+
+  function registerArcadeTap(now) {
+    const session = appState.arcade.activeLineSession;
+    if (
+      !session ||
+      !appState.isSessionActive ||
+      appState.arcade.runState !== "active" ||
+      appState.arcade.streamPhase !== "performing"
+    ) {
+      return false;
+    }
+
+    const tapTime = typeof now === "number" ? now : performance.now();
+    const withinLineMs = Math.round(
+      tapTime - session.lineStartTimeMs - appState.arcade.latencyCompensationMs,
+    );
+    if (withinLineMs < -260 || withinLineMs > session.line.exercise.totalDurationMs + 260) {
+      return false;
+    }
+
+    session.tapsMs.push(withinLineMs);
+    session.totalTapCount += 1;
+
+    const nearest = findNearestExpectedOffset(session.line.exercise.expectedOnsetsMs, withinLineMs);
+    const isExtraTap = session.resolvedExpectedIndices.has(nearest.expectedIndex);
+    if (!isExtraTap && nearest.expectedIndex >= 0) {
+      session.resolvedExpectedIndices.add(nearest.expectedIndex);
+    }
+
+    appState.arcade.activeLiveFeedback.flashTap(withinLineMs, nearest.offsetMs);
+    setLiveTimingFeedback({ offsetMs: nearest.offsetMs, isExtra: isExtraTap });
+    if (isExtraTap) {
+      registerArcadeExtraTap(nearest.offsetMs);
+    } else {
+      registerArcadeHit(nearest.offsetMs);
+    }
+    return true;
+  }
+
+  function cancelArcadeStream(reason) {
+    const cancelReason = reason || "user";
+    if (!appState.isSessionActive && appState.arcade.streamPhase === "idle") {
+      return false;
+    }
+
+    appState.arcade.activeLiveFeedback.stopPlayhead();
+    clearArcadeStreamTimers();
+    appState.arcade.streamPhase = "idle";
+    appState.arcade.activeLineSession = null;
+    appState.isSessionActive = false;
+    setButtonsDisabled(false);
+    setBeatIndicator(false, cancelReason === "game-over" ? "Game Over" : "Stopped");
+
+    if (cancelReason === "life-lost") {
+      appState.arcade.runState = "paused";
+      setStatus("Life Lost");
+      setTapStatus("Life lost. Press Return to restart the stream with your remaining lives.");
+      resetLiveTimingFeedback("Life lost");
+      setArcadeOverlayMode("paused", {
+        eyebrow: "Life Lost",
+        title: "Shield Down",
+        text: "The music stopped. Press Return to jump back in on a fresh line with the same run.",
+        buttonText: "Continue Run (Return)",
+        showLevelSelect: false,
+        showTempoSelect: false,
+      });
+      return true;
+    }
+
+    if (cancelReason === "game-over" || appState.arcade.gameOver) {
+      appState.arcade.runState = "gameover";
+      const summary = buildGameOverSummary();
+      appState.arcade.lastGameOverSummary = summary;
+      setStatus("Game Over");
+      setTapStatus("Run over. Final score ready.");
+      resetLiveTimingFeedback("Run over");
+      setArcadeOverlayMode("hidden");
+      showGameOverModal(summary);
+      return true;
+    }
+
+    appState.arcade.runState = "paused";
+    setStatus("Stopped");
+    setTapStatus("Run interrupted.");
+    resetLiveTimingFeedback("Run stopped");
+    setArcadeOverlayMode("paused", {
+      eyebrow: "Paused",
+      title: "Run Interrupted",
+      text: "Press Return to restart the stream.",
+      buttonText: "Continue Run (Return)",
+      showLevelSelect: false,
+      showTempoSelect: false,
+    });
+    return true;
+  }
+
+  async function runArcadeSegment() {
+    const activeLine = getActiveArcadeLine();
+    if (appState.isSessionActive || appState.arcade.runState !== "active" || !activeLine) {
+      return;
+    }
+
+    resetResults();
+    prepareArcadeRunState();
+    clearArcadeStreamTimers();
+    syncReadoutsForExercise(activeLine.exercise);
+    appState.arcade.activeLiveFeedback = renderArcadeStream(false);
+    setButtonsDisabled(true);
+    appState.isSessionActive = true;
+    appState.arcade.streamPhase = "count-in";
+    appState.arcade.activeLineSession = null;
+    setStatus("Count-in");
+    setTapStatus("Prepare for the stream...");
+    resetLiveTimingFeedback("Waiting for count-in...");
+    setArcadeBanner("GET READY...", "neutral");
+
+    try {
+      await metronome.prime();
+      await waitForAnimationFrames(2);
+      appState.arcade.latencyCompensationMs = metronome.getEstimatedLatencyMs() + 30;
+      const countInExercise = getCountInExerciseForLine(activeLine);
+      if (!countInExercise) {
+        throw new Error("Count-in preparation failed.");
+      }
+      const countInLeadInMs = 260;
+      const countInStartTimeMs = performance.now() + countInLeadInMs;
+      const lineStartTimeMs = countInStartTimeMs + countInExercise.totalDurationMs;
+
+      setTapStatus("Prepare for the stream... count-in starts in a moment.");
+      scheduleArcadeBeatSeries(countInStartTimeMs, countInExercise, "count-in");
+      scheduleArcadeAt(lineStartTimeMs, function () {
+        beginActiveArcadeLine(lineStartTimeMs);
+      }, "line-start");
+    } catch (error) {
+      clearArcadeStreamTimers();
+      appState.arcade.streamPhase = "idle";
+      appState.arcade.activeLineSession = null;
+      appState.isSessionActive = false;
+      setButtonsDisabled(false);
+      setStatus("Error");
+      setBeatIndicator(false, "Error");
+      setTapStatus("Run failed: " + error.message);
+      setArcadeBanner("SYSTEM ERROR", "bad");
+      spawnArcadeFloat("ERROR", "bad", "lg");
+      appState.arcade.runState = "paused";
+      setArcadeOverlayMode("paused", {
+        eyebrow: "System Error",
+        title: "Run Interrupted",
+        text: "Something failed while starting the next line. Press Return to try again.",
+        buttonText: "Continue Run (Return)",
+        showLevelSelect: false,
+        showTempoSelect: false,
+      });
+    }
+  }
+
+  function startArcadeRun(options) {
+    const config = options || {};
+    if (appState.isSessionActive) {
+      return;
+    }
+
+    hideGameOverModal();
+    setArcadeOverlayMode("hidden");
+
+    if (!config.continueExisting) {
+      resetArcadeProfileState();
+      const chosenLevel = syncSelectedLevel(Number(ui.startLevelSelect?.value || 1));
+      appState.arcade.currentLevel = chosenLevel;
+      appState.arcade.peakLevel = chosenLevel;
+      appState.arcade.fixedTempoBpm = clampTempo(
+        Number(ui.overlayTempoInput?.value || appState.selectedTempoBpm || ui.tempoInput?.value || 90),
+      );
+    } else if (!appState.arcade.fixedTempoBpm) {
+      appState.arcade.fixedTempoBpm = clampTempo(
+        Number(ui.overlayTempoInput?.value || appState.selectedTempoBpm || ui.tempoInput?.value || 90),
+      );
+    }
+
+    appState.selectedTempoBpm = appState.arcade.fixedTempoBpm;
+    syncTempoControls(appState.arcade.fixedTempoBpm);
+
+    appState.arcade.runState = "active";
+    try {
+      setupArcadeLineQueue();
+    } catch (error) {
+      recordArcadeDiagnostic("start-run-failed", {
+        error: error.message,
+        level: appState.arcade.currentLevel,
+        tempoBpm: appState.arcade.fixedTempoBpm,
+      });
+      appState.arcade.runState = "paused";
+      setStatus("Error");
+      setBeatIndicator(false, "Error");
+      setTapStatus("Run failed to build the opening stream.");
+      setArcadeBanner("STARTUP ERROR", "bad");
+      setArcadeOverlayMode("paused", {
+        eyebrow: "Startup Error",
+        title: "Run Interrupted",
+        text: "Level " + appState.arcade.currentLevel + " failed during opening stream generation. Press Return to try again.",
+        buttonText: "Retry Run (Return)",
+        showLevelSelect: false,
+        showTempoSelect: false,
+      });
+      return;
+    }
+
+    setStatus("Arcade Run");
+    setTapStatus("Survive the stream. Keep hitting the live line.");
+    resetLiveTimingFeedback("Press Space when the line starts");
+    runArcadeSegment();
+  }
+
+  function installArcadeDebugHooks() {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.__rhythmDebug = {
+      getDiagnostics: function () {
+        return appState.arcade.diagnostics.slice();
+      },
+      stressArcadeLevel: function (levelId, sampleCount) {
+        const safeLevel = Math.max(1, Math.min(5, Number(levelId) || 1));
+        const safeCount = Math.max(1, Math.min(200, Number(sampleCount) || 24));
+        const levelConfig = getLevelConfig(safeLevel);
+        const successesBySignature = {};
+        const failures = [];
+
+        levelConfig.allowedTimeSignatures.forEach(function (signatureText) {
+          successesBySignature[signatureText] = 0;
+        });
+
+        for (let index = 0; index < safeCount; index += 1) {
+          const signatureText =
+            levelConfig.allowedTimeSignatures[index % levelConfig.allowedTimeSignatures.length];
+          try {
+            createValidatedExercise(levelConfig, {
+              tempoBpm: appState.arcade.fixedTempoBpm || appState.selectedTempoBpm || 90,
+              measuresPerExercise: getArcadeMeasuresPerLine(
+                safeLevel,
+                parseTimeSignature(signatureText),
+              ),
+              timeSignature: parseTimeSignature(signatureText),
+            });
+            successesBySignature[signatureText] += 1;
+          } catch (error) {
+            failures.push({
+              signature: signatureText,
+              error: error.message,
+            });
+          }
+        }
+
+        const summary = {
+          level: safeLevel,
+          sampleCount: safeCount,
+          successesBySignature: successesBySignature,
+          failures: failures,
+        };
+        recordArcadeDiagnostic("stress-test", summary);
+        return summary;
+      },
+    };
+  }
+
+  function installArcadeErrorCapture() {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.addEventListener("error", function (event) {
+      if (!event) {
+        return;
+      }
+      const error = event.error || new Error(event.message || "Window error");
+      handleArcadeRuntimeError(error, {
+        label: "window-error",
+      });
+    });
+
+    window.addEventListener("unhandledrejection", function (event) {
+      const reason = event?.reason;
+      const error =
+        reason instanceof Error
+          ? reason
+          : new Error(typeof reason === "string" ? reason : "Unhandled promise rejection");
+      handleArcadeRuntimeError(error, {
+        label: "unhandled-rejection",
+      });
+    });
+  }
+
+  function shouldIgnoreEnterShortcutTarget(target) {
+    if (!target || !(target instanceof Element)) {
+      return false;
+    }
+
+    const interactiveSelector = "input, textarea, select";
+    if (target.matches(interactiveSelector) || target.closest(interactiveSelector)) {
+      return true;
+    }
+    return false;
+  }
+
   async function runSession(loops) {
     if (appState.isSessionActive) {
+      return;
+    }
+    if (appState.arcade.gameOver) {
+      setArcadeBanner("GAME OVER! PRESS RESTART", "bad");
+      setStatus("Game Over");
+      setTapStatus("No lives left. Restart to continue.");
+      setPostRunActionsMode("gameover");
       return;
     }
 
@@ -2333,6 +4580,8 @@
     if (!appState.exercise) {
       return;
     }
+    appState.lastSessionLoops = loops;
+    setPostRunActionsMode("hidden");
 
     const sessionExercise = {
       ...appState.exercise,
@@ -2342,10 +4591,13 @@
       }),
       expectedOnsetsMs: [...appState.exercise.expectedOnsetsMs],
     };
+    const sessionRhythmId = appState.currentRhythmId;
     const attemptNumber = appState.nextAttemptNumber;
     appState.nextAttemptNumber += 1;
 
     resetResults();
+    prepareArcadeRunState();
+    setArcadeBanner(loops === 1 ? "SINGLE ATTEMPT START" : "LOOP x" + loops + " CHALLENGE", "good");
     const liveNoteFeedback = renderNotation(ui.notationContainer, sessionExercise, []);
     const liveHitByLoop = Array.from({ length: loops }, function () {
       return new Set();
@@ -2372,6 +4624,7 @@
           }
           hitSet.add(expectedIndex);
           liveNoteFeedback.flashMiss(expectedIndex);
+          registerArcadeMiss();
         }, Math.max(0, delayMs));
         missTimeouts.push(timeoutId);
       });
@@ -2381,6 +4634,7 @@
     setStatus("Starting");
     setTapStatus("Preparing audio and count-in...");
     resetLiveTimingFeedback("Waiting for count-in...");
+    setArcadeBanner("GET READY...", "neutral");
 
     let totalTapCount = 0;
 
@@ -2392,6 +4646,7 @@
           latencyCompensationMs +
           " ms",
       );
+      setArcadeBanner("COUNT-IN", "neutral");
 
       await timingEngine.start({
         exercise: sessionExercise,
@@ -2401,15 +4656,19 @@
           if (state === "count-in") {
             setStatus("Count-in");
             setBeatIndicator(true, "Count-in...");
+            setArcadeBanner("COUNT-IN", "neutral");
           } else if (state === "performing") {
             setStatus("Recording");
             setBeatIndicator(true, "Play now");
+            setArcadeBanner("GO GO GO", "good");
           } else if (state === "complete") {
             setStatus("Scoring");
             setBeatIndicator(false, "Scoring...");
+            setArcadeBanner("SCORING...", "neutral");
           } else if (state === "cancelled") {
             setStatus("Cancelled");
             setBeatIndicator(false, "Cancelled");
+            setArcadeBanner("RUN CANCELLED", "bad");
           }
         },
         onBeat: function (payload) {
@@ -2421,6 +4680,7 @@
           liveNoteFeedback.startPlayhead(sessionExercise.totalDurationMs);
           scheduleLoopMissChecks(loopNumber);
           resetLiveTimingFeedback("Loop " + loopNumber + ": waiting for tap");
+          setArcadeBanner("LOOP " + loopNumber + "/" + loops, "neutral");
           if (loops > 1) {
             setTapStatus("Loop " + loopNumber + "/" + loops + " active. Press Space on each note.");
           } else {
@@ -2430,11 +4690,20 @@
         onTap: function (payload) {
           totalTapCount = payload.totalTapCount;
           const nearest = findNearestExpectedOffset(sessionExercise.expectedOnsetsMs, payload.withinLoopMs);
-          if (nearest.expectedIndex >= 0 && liveHitByLoop[payload.loop - 1]) {
-            liveHitByLoop[payload.loop - 1].add(nearest.expectedIndex);
+          const hitSet = liveHitByLoop[payload.loop - 1];
+          let isExtraTap = false;
+
+          if (nearest.expectedIndex >= 0 && hitSet) {
+            isExtraTap = hitSet.has(nearest.expectedIndex);
+            hitSet.add(nearest.expectedIndex);
           }
           liveNoteFeedback.flashTap(payload.withinLoopMs, nearest.offsetMs);
-          setLiveTimingFeedback({ offsetMs: nearest.offsetMs });
+          setLiveTimingFeedback({ offsetMs: nearest.offsetMs, isExtra: isExtraTap });
+          if (isExtraTap) {
+            registerArcadeExtraTap(nearest.offsetMs);
+          } else {
+            registerArcadeHit(nearest.offsetMs);
+          }
           setTapStatus(
             "Loop " +
               payload.loop +
@@ -2463,6 +4732,13 @@
             const result = gradeAttempt(sessionExercise.expectedOnsetsMs, payload.loopTapsMs[0]);
             appState.loopResults = [result];
             renderSummaryCards(ui.summaryCards, result, "Attempt");
+            const arcadeSummary = finalizeArcadeSession({
+              accuracy: result.overallAccuracy,
+              missed: result.missedCount,
+              extra: result.extraTapCount,
+              rhythmId: sessionRhythmId,
+            });
+            appendArcadeSummaryCards(ui.summaryCards, arcadeSummary);
             renderNotation(ui.notationContainer, sessionExercise, [
               buildNotationAnalysisRow(
                 "Attempt",
@@ -2471,15 +4747,19 @@
                 result,
               ),
             ]);
-            renderAttemptTable(
-              ui.feedbackTableBody,
-              sessionExercise.expectedOnsetsMs,
-              payload.loopTapsMs[0],
-              result,
+            setTapStatus(
+              "Completed. Recorded " +
+                payload.loopTapsMs[0].length +
+                " taps. Rank " +
+                arcadeSummary.rank +
+                ". Score " +
+                formatArcadeScore(arcadeSummary.finalScore) +
+                ". Chain x" +
+                arcadeSummary.rhythmSetChain +
+                ".",
             );
-            ui.timelineStrip.innerHTML = "";
-            setTapStatus("Completed. Recorded " + payload.loopTapsMs[0].length + " taps.");
             setStatus("Ready");
+            setPostRunActionsMode("results");
             addSessionLogEntry({
               attemptNumber: attemptNumber,
               level: sessionExercise.level,
@@ -2525,10 +4805,25 @@
             },
             "Challenge Avg",
           );
+          const arcadeSummary = finalizeArcadeSession({
+            accuracy: challenge.averageScore,
+            missed: totalMissed,
+            extra: totalExtra,
+            rhythmId: sessionRhythmId,
+          });
+          appendArcadeSummaryCards(ui.summaryCards, arcadeSummary);
 
           renderLoopBreakdown(ui.loopBreakdown, challenge.loopResults, challenge.averageScore);
-          addLoopButtons(challenge.loopResults.length);
-          showLoopDetail(0);
+          setTapStatus(
+              "Challenge complete. Rank " +
+              arcadeSummary.rank +
+              ". Score " +
+              formatArcadeScore(arcadeSummary.finalScore) +
+              ". Chain x" +
+              arcadeSummary.rhythmSetChain +
+              ".",
+          );
+          setPostRunActionsMode("results");
           addSessionLogEntry({
             attemptNumber: attemptNumber,
             level: sessionExercise.level,
@@ -2554,7 +4849,18 @@
           const recordedTaps = payload.loopTapsMs.reduce(function (sum, taps) {
             return sum + taps.length;
           }, 0);
-          setTapStatus("Cancelled. Recorded " + recordedTaps + " taps.");
+          if (appState.arcade.gameOver) {
+            setStatus("Game Over");
+            setTapStatus("No lives left. Restart to continue.");
+            setArcadeBanner("GAME OVER! PRESS RESTART", "bad");
+            setPostRunActionsMode("gameover");
+          } else {
+            setTapStatus("Cancelled. Recorded " + recordedTaps + " taps.");
+            setArcadeBanner("RUN CANCELLED", "bad");
+            spawnArcadeFloat("RUN OVER", "bad", "lg");
+            pulseArcadeShellClass("arcade-punish", 420);
+            setPostRunActionsMode("results");
+          }
           addSessionLogEntry({
             attemptNumber: attemptNumber,
             level: sessionExercise.level,
@@ -2577,6 +4883,10 @@
       setBeatIndicator(false, "Error");
       setTapStatus("Session failed: " + error.message);
       resetLiveTimingFeedback("Session failed");
+      setArcadeBanner("SYSTEM ERROR", "bad");
+      spawnArcadeFloat("ERROR", "bad", "lg");
+      pulseArcadeShellClass("arcade-punish", 420);
+      setPostRunActionsMode("results");
       addSessionLogEntry({
         attemptNumber: attemptNumber,
         level: sessionExercise.level,
@@ -2595,15 +4905,55 @@
     if (!appState.isSessionActive) {
       return;
     }
+    if (appState.arcade.runState === "active" || appState.arcade.streamPhase !== "idle") {
+      cancelArcadeStream("user");
+      return;
+    }
     timingEngine.cancel("user");
   }
 
   function installKeyboardCapture() {
     window.addEventListener("keydown", function (event) {
+      const isEnter = event.code === "Enter" || event.code === "NumpadEnter";
+      if (isEnter) {
+        if (event.repeat || appState.isSessionActive) {
+          return;
+        }
+
+        if (ui.gameOverModal && !ui.gameOverModal.hidden && ui.playAgainBtn) {
+          event.preventDefault();
+          ui.playAgainBtn.click();
+          return;
+        }
+
+        if (ui.arcadeOverlay && !ui.arcadeOverlay.hidden && ui.overlayPrimaryBtn) {
+          event.preventDefault();
+          if (shouldIgnoreEnterShortcutTarget(event.target) && event.target !== ui.startLevelSelect) {
+            return;
+          }
+          ui.overlayPrimaryBtn.click();
+          return;
+        }
+
+        if (appState.arcade.gameOver) {
+          event.preventDefault();
+          handlePlayAgainAction();
+          return;
+        }
+
+        if (shouldIgnoreEnterShortcutTarget(event.target)) {
+          return;
+        }
+        return;
+      }
+
       if (event.code !== "Space") {
         return;
       }
-      if (timingEngine.shouldTrapSpacebar()) {
+      const arcadeShouldTrap =
+        appState.arcade.runState === "active" &&
+        (appState.arcade.streamPhase === "count-in" || appState.arcade.streamPhase === "performing");
+      if (arcadeShouldTrap || timingEngine.shouldTrapSpacebar()) {
         event.preventDefault();
       }
 
@@ -2611,11 +4961,13 @@
         return;
       }
       appState.isSpaceHeld = true;
-      if (timingEngine.isTapWindowOpen()) {
+      const arcadeTapOpen =
+        appState.arcade.runState === "active" && appState.arcade.streamPhase === "performing";
+      if (arcadeTapOpen || timingEngine.isTapWindowOpen()) {
         metronome.tapFeedback();
       }
 
-      const wasRecorded = timingEngine.registerTap();
+      const wasRecorded = arcadeTapOpen ? registerArcadeTap() : timingEngine.registerTap();
       if (wasRecorded) {
         event.preventDefault();
       }
@@ -2633,17 +4985,35 @@
   }
 
   function wireControls() {
-    ui.generateBtn.addEventListener("click", generateNewExercise);
-    ui.startBtn.addEventListener("click", () => runSession(1));
-    ui.loopBtn.addEventListener("click", () => runSession(4));
+    ui.generateBtn.addEventListener("click", function () {
+      setupArcadeLineQueue();
+    });
+    ui.startBtn.addEventListener("click", function () {
+      startArcadeRun({ continueExisting: false });
+    });
+    ui.loopBtn.addEventListener("click", function () {
+      startArcadeRun({ continueExisting: false });
+    });
     ui.cancelBtn.addEventListener("click", cancelSession);
-    ui.levelSelect.addEventListener("change", generateNewExercise);
+    ui.levelSelect.addEventListener("change", function (event) {
+      syncSelectedLevel(event.target.value);
+    });
     ui.tempoSlider.addEventListener("input", function (event) {
       applyTempoToExercise(event.target.value, "user");
     });
     ui.tempoInput.addEventListener("input", function (event) {
       applyTempoToExercise(event.target.value, "user");
     });
+    if (ui.overlayTempoSlider) {
+      ui.overlayTempoSlider.addEventListener("input", function (event) {
+        applyTempoToExercise(event.target.value, "user");
+      });
+    }
+    if (ui.overlayTempoInput) {
+      ui.overlayTempoInput.addEventListener("input", function (event) {
+        applyTempoToExercise(event.target.value, "user");
+      });
+    }
     ui.clickSoundSelect.addEventListener("change", function (event) {
       metronome.setSoundMode(event.target.value);
     });
@@ -2657,18 +5027,34 @@
         clearSessionLog();
       });
     }
+    if (ui.startLevelSelect) {
+      ui.startLevelSelect.addEventListener("change", function (event) {
+        syncSelectedLevel(event.target.value);
+      });
+    }
+    if (ui.overlayPrimaryBtn) {
+      ui.overlayPrimaryBtn.addEventListener("click", handleOverlayPrimaryAction);
+    }
+    if (ui.playAgainBtn) {
+      ui.playAgainBtn.addEventListener("click", handlePlayAgainAction);
+    }
   }
 
   function init() {
     populateLevelSelector();
     metronome.setSoundMode(ui.clickSoundSelect.value);
+    appState.arcade.bestScore = safeGetArcadeBestScore();
+    applyTempoToExercise(ui.overlayTempoInput?.value || ui.tempoInput?.value || 90, "system");
+    resetArcadeProfileState();
+    installArcadeDebugHooks();
     wireControls();
     installKeyboardCapture();
-    setButtonsDisabled(false);
+    installArcadeErrorCapture();
+    setButtonsDisabled(true);
     refreshSessionLogVisibility();
     setSessionLogOpen(false);
     resetLiveTimingFeedback();
-    generateNewExercise();
+    openTitleScreen();
   }
 
   init();
