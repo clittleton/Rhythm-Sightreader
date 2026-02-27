@@ -47,6 +47,13 @@
             Start Run (Return)
           </button>
         </div>
+        <section class="overlay-history-panel" aria-label="Recent arcade runs">
+          <div class="overlay-history-header">
+            <h3>Recent Runs</h3>
+          </div>
+          <p id="overlayHistoryEmpty" class="overlay-history-empty">No completed runs yet.</p>
+          <div id="overlayHistoryList" class="overlay-history-list"></div>
+        </section>
       </div>
     </section>
 
@@ -191,6 +198,15 @@
           <strong id="liveTimingText">Waiting for first tap</strong>
         </div>
 
+        <section id="arcadeHistoryPanel" class="arcade-history-panel" aria-label="Arcade run history">
+          <div class="session-log-header">
+            <h3>Run History</h3>
+            <button id="clearArcadeHistoryBtn" type="button">Clear</button>
+          </div>
+          <p id="arcadeHistoryEmpty" class="session-log-empty">No completed runs yet.</p>
+          <div id="arcadeHistoryList" class="arcade-history-list"></div>
+        </section>
+
         <section id="sessionLogPanel" class="session-log-panel" hidden>
           <div class="session-log-header">
             <h3>Session History</h3>
@@ -254,6 +270,13 @@
             Back To Start (Return)
           </button>
         </div>
+        <section class="overlay-history-panel game-over-history-panel" aria-label="Recent arcade runs">
+          <div class="overlay-history-header">
+            <h3>Recent Runs</h3>
+          </div>
+          <p id="gameOverHistoryEmpty" class="overlay-history-empty">No completed runs yet.</p>
+          <div id="gameOverHistoryList" class="overlay-history-list"></div>
+        </section>
       </div>
     </section>
 

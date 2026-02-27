@@ -2255,6 +2255,10 @@
     clearLogBtn: document.getElementById("clearLogBtn"),
     sessionLogBody: document.getElementById("sessionLogBody"),
     sessionLogEmpty: document.getElementById("sessionLogEmpty"),
+    arcadeHistoryPanel: document.getElementById("arcadeHistoryPanel"),
+    arcadeHistoryList: document.getElementById("arcadeHistoryList"),
+    arcadeHistoryEmpty: document.getElementById("arcadeHistoryEmpty"),
+    clearArcadeHistoryBtn: document.getElementById("clearArcadeHistoryBtn"),
     arcadeScoreValue: document.getElementById("arcadeScoreValue"),
     arcadeLevelValue: document.getElementById("arcadeLevelValue"),
     arcadeHighScoreValue: document.getElementById("arcadeHighScoreValue"),
@@ -2280,6 +2284,8 @@
     overlayLevelGroup: document.getElementById("overlayLevelGroup"),
     overlayTempoGroup: document.getElementById("overlayTempoGroup"),
     overlayPrimaryBtn: document.getElementById("overlayPrimaryBtn"),
+    overlayHistoryList: document.getElementById("overlayHistoryList"),
+    overlayHistoryEmpty: document.getElementById("overlayHistoryEmpty"),
     startLevelSelect: document.getElementById("startLevelSelect"),
     overlayTempoSlider: document.getElementById("overlayTempoSlider"),
     overlayTempoInput: document.getElementById("overlayTempoInput"),
@@ -2290,6 +2296,8 @@
     gameOverPeakLevelValue: document.getElementById("gameOverPeakLevelValue"),
     gameOverBestComboValue: document.getElementById("gameOverBestComboValue"),
     gameOverBestChainValue: document.getElementById("gameOverBestChainValue"),
+    gameOverHistoryList: document.getElementById("gameOverHistoryList"),
+    gameOverHistoryEmpty: document.getElementById("gameOverHistoryEmpty"),
     playAgainBtn: document.getElementById("playAgainBtn"),
   };
 
@@ -2304,7 +2312,10 @@
     selectedTempoBpm: null,
     isSessionActive: false,
     isSpaceHeld: false,
+    ignoreSpaceUntilMs: 0,
     sessionLogEntries: [],
+    arcadeRunHistory: [],
+    nextArcadeRunNumber: 1,
     nextAttemptNumber: 1,
     isLogOpen: false,
     rhythmIdCounter: 0,
@@ -2352,6 +2363,7 @@
       scrollMetrics: null,
       diagnostics: [],
       lastGameOverSummary: null,
+      runStartBestScore: 0,
     },
   };
 
@@ -2751,6 +2763,7 @@
     appState.arcade.scrollMetrics = null;
     appState.arcade.diagnostics = [];
     appState.arcade.lastGameOverSummary = null;
+    appState.arcade.runStartBestScore = appState.arcade.bestScore;
     clearArcadeFx();
     setArcadeDangerMode(false);
     setArcadeBanner("READY PLAYER ONE", "neutral");
@@ -3085,6 +3098,23 @@
     return typeof value === "number" ? String(value) : "-";
   }
 
+  function formatArcadeHistoryTime(timestampMs) {
+    return new Date(timestampMs).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }
+
+  function engageSpacebarCooldown(durationMs) {
+    const cooldownMs = Math.max(0, Number(durationMs) || 0);
+    appState.ignoreSpaceUntilMs = Math.max(appState.ignoreSpaceUntilMs, performance.now() + cooldownMs);
+    appState.isSpaceHeld = false;
+  }
+
+  function isSpacebarCooldownActive() {
+    return performance.now() < appState.ignoreSpaceUntilMs;
+  }
+
   function refreshSessionLogVisibility() {
     if (!ui.sessionLogBody || !ui.sessionLogEmpty) {
       return;
@@ -3184,6 +3214,149 @@
     }
     refreshSessionLogVisibility();
     updateSessionLogToggleLabel();
+  }
+
+  function refreshArcadeHistoryVisibility() {
+    if (!ui.arcadeHistoryList || !ui.arcadeHistoryEmpty) {
+      renderOverlayArcadeHistory();
+      return;
+    }
+    const hasEntries = appState.arcadeRunHistory.length > 0;
+    ui.arcadeHistoryEmpty.hidden = hasEntries;
+    ui.arcadeHistoryList.hidden = !hasEntries;
+    renderOverlayArcadeHistory();
+  }
+
+  function buildOverlayArcadeHistoryCard(entry) {
+    const item = document.createElement("article");
+    item.className = "overlay-history-card" + (entry.wasHighScore ? " is-best" : "");
+
+    const topLine = document.createElement("div");
+    topLine.className = "overlay-history-topline";
+
+    const runLabel = document.createElement("span");
+    runLabel.className = "overlay-history-run";
+    runLabel.textContent = "Run " + entry.runNumber + " · " + formatArcadeHistoryTime(entry.timestampMs);
+    topLine.append(runLabel);
+
+    const scoreValue = document.createElement("strong");
+    scoreValue.className = "overlay-history-score";
+    scoreValue.textContent = formatArcadeScore(entry.finalScore);
+    topLine.append(scoreValue);
+
+    const subLine = document.createElement("div");
+    subLine.className = "overlay-history-subline";
+
+    const leftMeta = document.createElement("span");
+    leftMeta.textContent = "Rank " + entry.rank + " · Peak L" + entry.peakLevel;
+    subLine.append(leftMeta);
+
+    const rightMeta = document.createElement("span");
+    rightMeta.textContent = entry.wasHighScore ? "New High Score" : "Best " + formatArcadeScore(entry.highScore);
+    subLine.append(rightMeta);
+
+    item.append(topLine);
+    item.append(subLine);
+    return item;
+  }
+
+  function renderOverlayArcadeHistory() {
+    const containers = [
+      {
+        list: ui.overlayHistoryList,
+        empty: ui.overlayHistoryEmpty,
+      },
+      {
+        list: ui.gameOverHistoryList,
+        empty: ui.gameOverHistoryEmpty,
+      },
+    ];
+
+    containers.forEach(function (container) {
+      if (!container.list || !container.empty) {
+        return;
+      }
+      container.list.innerHTML = "";
+      const entries = appState.arcadeRunHistory.slice(0, 5);
+      const hasEntries = entries.length > 0;
+      container.empty.hidden = hasEntries;
+      entries.forEach(function (entry) {
+        container.list.append(buildOverlayArcadeHistoryCard(entry));
+      });
+    });
+  }
+
+  function buildArcadeHistoryItem(entry) {
+    const item = document.createElement("article");
+    item.className = "arcade-history-item" + (entry.wasHighScore ? " is-best" : "");
+
+    const topRow = document.createElement("div");
+    topRow.className = "arcade-history-top";
+
+    const runLabel = document.createElement("span");
+    runLabel.className = "arcade-history-run";
+    runLabel.textContent = "Run " + entry.runNumber + " · " + formatArcadeHistoryTime(entry.timestampMs);
+    topRow.append(runLabel);
+
+    const scoreValue = document.createElement("strong");
+    scoreValue.className = "arcade-history-score";
+    scoreValue.textContent = formatArcadeScore(entry.finalScore);
+    topRow.append(scoreValue);
+
+    const badgeRow = document.createElement("div");
+    badgeRow.className = "arcade-history-badges";
+
+    const rankBadge = document.createElement("span");
+    rankBadge.className = "arcade-history-badge rank";
+    rankBadge.textContent = "Rank " + entry.rank;
+    badgeRow.append(rankBadge);
+
+    if (entry.wasHighScore) {
+      const bestBadge = document.createElement("span");
+      bestBadge.className = "arcade-history-badge best";
+      bestBadge.textContent = "New High Score";
+      badgeRow.append(bestBadge);
+    }
+
+    const metaRow = document.createElement("div");
+    metaRow.className = "arcade-history-meta";
+
+    const leftMeta = document.createElement("span");
+    leftMeta.textContent =
+      "Cleared " +
+      entry.rhythmsCleared +
+      " · Peak L" +
+      entry.peakLevel +
+      " · Combo " +
+      entry.bestCombo;
+    metaRow.append(leftMeta);
+
+    const rightMeta = document.createElement("span");
+    rightMeta.textContent = "Best " + formatArcadeScore(entry.highScore);
+    metaRow.append(rightMeta);
+
+    item.append(topRow);
+    item.append(badgeRow);
+    item.append(metaRow);
+    return item;
+  }
+
+  function appendArcadeRunHistory(entry) {
+    if (!ui.arcadeHistoryList) {
+      return;
+    }
+    appState.arcadeRunHistory.unshift(entry);
+    ui.arcadeHistoryList.prepend(buildArcadeHistoryItem(entry));
+    refreshArcadeHistoryVisibility();
+  }
+
+  function clearArcadeRunHistory() {
+    appState.arcadeRunHistory = [];
+    appState.nextArcadeRunNumber = 1;
+    if (ui.arcadeHistoryList) {
+      ui.arcadeHistoryList.innerHTML = "";
+    }
+    refreshArcadeHistoryVisibility();
   }
 
   function timingClassFromOffset(offsetMs) {
@@ -3367,7 +3540,7 @@
     }
     ui.gameOverModal.hidden = false;
     if (ui.gameOverTitle) {
-      ui.gameOverTitle.textContent = "Game Over";
+      ui.gameOverTitle.textContent = summary.wasHighScore ? "New High Score" : "Game Over";
     }
     if (ui.gameOverScoreValue) {
       ui.gameOverScoreValue.textContent = formatArcadeScore(summary.finalScore);
@@ -3419,12 +3592,17 @@
   }
 
   function buildGameOverSummary() {
+    const previousBestScore = Math.max(0, Number(appState.arcade.runStartBestScore) || 0);
     return {
       finalScore: appState.arcade.score,
       rhythmsCleared: appState.arcade.rhythmsCleared,
       peakLevel: appState.arcade.peakLevel,
       bestCombo: appState.arcade.bestStreak,
       bestChain: appState.arcade.bestRhythmSetChain,
+      rank: appState.arcade.rank,
+      highScore: appState.arcade.bestScore,
+      previousBestScore: previousBestScore,
+      wasHighScore: appState.arcade.score > previousBestScore,
     };
   }
 
@@ -4311,6 +4489,7 @@
     setBeatIndicator(false, cancelReason === "game-over" ? "Game Over" : "Stopped");
 
     if (cancelReason === "life-lost") {
+      engageSpacebarCooldown(420);
       appState.arcade.runState = "paused";
       setStatus("Life Lost");
       setTapStatus("Life lost. Press Return to restart the stream with your remaining lives.");
@@ -4327,9 +4506,21 @@
     }
 
     if (cancelReason === "game-over" || appState.arcade.gameOver) {
+      engageSpacebarCooldown(520);
       appState.arcade.runState = "gameover";
       const summary = buildGameOverSummary();
       appState.arcade.lastGameOverSummary = summary;
+      appendArcadeRunHistory({
+        runNumber: appState.nextArcadeRunNumber++,
+        timestampMs: Date.now(),
+        finalScore: summary.finalScore,
+        rhythmsCleared: summary.rhythmsCleared,
+        peakLevel: summary.peakLevel,
+        bestCombo: summary.bestCombo,
+        rank: summary.rank,
+        wasHighScore: summary.wasHighScore,
+        highScore: summary.highScore,
+      });
       setStatus("Game Over");
       setTapStatus("Run over. Final score ready.");
       resetLiveTimingFeedback("Run over");
@@ -4338,6 +4529,7 @@
       return true;
     }
 
+    engageSpacebarCooldown(420);
     appState.arcade.runState = "paused";
     setStatus("Stopped");
     setTapStatus("Run interrupted.");
@@ -4391,6 +4583,7 @@
         beginActiveArcadeLine(lineStartTimeMs);
       }, "line-start");
     } catch (error) {
+      engageSpacebarCooldown(420);
       clearArcadeStreamTimers();
       appState.arcade.streamPhase = "idle";
       appState.arcade.activeLineSession = null;
@@ -4438,6 +4631,7 @@
 
     appState.selectedTempoBpm = appState.arcade.fixedTempoBpm;
     syncTempoControls(appState.arcade.fixedTempoBpm);
+    appState.arcade.runStartBestScore = appState.arcade.bestScore;
 
     appState.arcade.runState = "active";
     try {
@@ -4448,6 +4642,7 @@
         level: appState.arcade.currentLevel,
         tempoBpm: appState.arcade.fixedTempoBpm,
       });
+      engageSpacebarCooldown(420);
       appState.arcade.runState = "paused";
       setStatus("Error");
       setBeatIndicator(false, "Error");
@@ -4950,6 +5145,10 @@
       if (event.code !== "Space") {
         return;
       }
+      if (isSpacebarCooldownActive()) {
+        event.preventDefault();
+        return;
+      }
       const arcadeShouldTrap =
         appState.arcade.runState === "active" &&
         (appState.arcade.streamPhase === "count-in" || appState.arcade.streamPhase === "performing");
@@ -5027,6 +5226,11 @@
         clearSessionLog();
       });
     }
+    if (ui.clearArcadeHistoryBtn) {
+      ui.clearArcadeHistoryBtn.addEventListener("click", function () {
+        clearArcadeRunHistory();
+      });
+    }
     if (ui.startLevelSelect) {
       ui.startLevelSelect.addEventListener("change", function (event) {
         syncSelectedLevel(event.target.value);
@@ -5052,6 +5256,7 @@
     installArcadeErrorCapture();
     setButtonsDisabled(true);
     refreshSessionLogVisibility();
+    refreshArcadeHistoryVisibility();
     setSessionLogOpen(false);
     resetLiveTimingFeedback();
     openTitleScreen();

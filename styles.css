@@ -237,6 +237,83 @@ body {
   margin-top: 18px;
 }
 
+.overlay-history-panel {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(138, 176, 230, 0.24);
+}
+
+.overlay-history-header h3 {
+  margin: 0;
+  font-size: 0.86rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #c9dcf7;
+}
+
+.overlay-history-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.overlay-history-list {
+  display: grid;
+  gap: 8px;
+  max-height: min(32vh, 260px);
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.overlay-history-list:empty {
+  display: none;
+}
+
+.overlay-history-card {
+  display: grid;
+  gap: 6px;
+  padding: 10px 11px;
+  border-radius: 11px;
+  border: 1px solid rgba(136, 177, 225, 0.28);
+  background: rgba(12, 30, 54, 0.62);
+}
+
+.overlay-history-card.is-best {
+  border-color: rgba(255, 212, 81, 0.56);
+  background: linear-gradient(160deg, rgba(79, 58, 12, 0.34), rgba(14, 32, 56, 0.76));
+}
+
+.overlay-history-topline,
+.overlay-history-subline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.overlay-history-run {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: #9fc0e8;
+  font-weight: 700;
+}
+
+.overlay-history-score {
+  font-family: "Archivo Black", "Space Grotesk", sans-serif;
+  font-size: 1rem;
+  line-height: 1;
+  color: #ecf8ff;
+}
+
+.overlay-history-subline {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
 .overlay-primary-btn {
   border-color: rgba(89, 231, 165, 0.84);
   background: rgba(22, 70, 54, 0.76);
@@ -862,6 +939,105 @@ button:disabled {
   min-width: 0;
   display: flex;
   flex-wrap: wrap;
+}
+
+.arcade-history-panel {
+  display: grid;
+  gap: 10px;
+  margin-top: 2px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(134, 167, 211, 0.4);
+  background: rgba(17, 39, 69, 0.7);
+}
+
+.arcade-history-list {
+  display: grid;
+  gap: 9px;
+}
+
+.arcade-history-list[hidden] {
+  display: none;
+}
+
+.arcade-history-item {
+  display: grid;
+  gap: 8px;
+  padding: 10px 11px;
+  border-radius: 11px;
+  border: 1px solid rgba(136, 177, 225, 0.34);
+  background: rgba(12, 30, 54, 0.72);
+}
+
+.arcade-history-item.is-best {
+  border-color: rgba(255, 212, 81, 0.72);
+  background: linear-gradient(160deg, rgba(79, 58, 12, 0.4), rgba(14, 32, 56, 0.82));
+}
+
+.arcade-history-top,
+.arcade-history-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.arcade-history-run {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #9fc0e8;
+  font-weight: 700;
+}
+
+.arcade-history-score {
+  font-family: "Archivo Black", "Space Grotesk", sans-serif;
+  font-size: 1.22rem;
+  color: #dff6ff;
+  line-height: 1;
+}
+
+.arcade-history-item.is-best .arcade-history-score {
+  color: #fff0b0;
+  text-shadow: 0 0 14px rgba(255, 212, 81, 0.32);
+}
+
+.arcade-history-badges {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.arcade-history-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  border: 1px solid rgba(136, 177, 225, 0.42);
+  color: #d3e7ff;
+  background: rgba(26, 52, 88, 0.64);
+}
+
+.arcade-history-badge.best {
+  border-color: rgba(255, 212, 81, 0.76);
+  color: #fff0b0;
+  background: rgba(103, 73, 12, 0.54);
+}
+
+.arcade-history-badge.rank {
+  border-color: rgba(127, 240, 255, 0.56);
+  color: #cff9ff;
+  background: rgba(16, 64, 80, 0.54);
+}
+
+.arcade-history-meta {
+  font-size: 0.82rem;
+  color: var(--muted);
 }
 
 .live-note-feedback-layer,
